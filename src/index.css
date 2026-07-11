@@ -1,0 +1,16 @@
+@font-face {
+  font-family: 'Monocraft';
+  src: url('/fonts/Monocraft.ttf') format(truetype);
+  font-weight: normal;
+  font-style: normal;
+}
+
+body {
+  margin: 0;
+
+  font-family: 'Monocraft';
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+}
