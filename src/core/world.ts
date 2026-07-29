@@ -1,4 +1,5 @@
 import { Registry } from "./registry";
+import { getCoords, getIndex, isValidCoord } from "./grid";
 import type { GameState, ResourceGrid, CycleContext } from "./types";
 
 export class World {
@@ -18,14 +19,14 @@ export class World {
 
         this.registry = registry
 
-        const defaultDef = this.registry.get(defaultTypeId);
+        const defaultDef = this.registry.getCell(defaultTypeId);
         if (!defaultDef) {
             throw new Error(`Type "${defaultTypeId}" not found in registry`);
         }
 
         for (let i = 0; i < width * height; i++) {
             this.state.cells.push({
-                typeId: "core:empty",
+                typeId: defaultTypeId,
                 state: defaultDef.createState()
             });
         }
@@ -47,7 +48,7 @@ export class World {
 
         for (let i = 0; i < this.state.cells.length; i++) {
             const cell = this.state.cells[i];
-            const definition = this.registry.get(cell.typeId);
+            const definition = this.registry.getCell(cell.typeId);
 
             if (definition && definition.onCycle) {
                 const context: CycleContext<any> = {

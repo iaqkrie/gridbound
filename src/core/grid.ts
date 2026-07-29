@@ -10,5 +10,5 @@ export function getCoords (index: number, width: number): { x: number; y: number
 }
 
 export function isValidCoord (x: number, y: number, width: number, height: number): boolean {
-    return x >= 0 && x < width && y >= 0 && y <= height;
+    return x >= 0 && x < width && y >= 0 && y < height;
 }

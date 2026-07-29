@@ -1,13 +1,22 @@
-import type { CellDefinition } from "./types";
+import type { CellDefinition, ResourceDefinition } from "./types";
 
 export class Registry {
-    private definitions = new Map<string, CellDefinition<any>>();
+    private cells = new Map<string, CellDefinition<any>>();
+    private resources = new Map<string, ResourceDefinition>();
 
-    register (definition: CellDefinition<any>): void {
-        this.definitions.set(definition.id, definition);
+    registerCell (definition: CellDefinition<any>): void {
+        this.cells.set(definition.id, definition);
     }
 
-    get (id: string): CellDefinition<any> | undefined {
-        return this.definitions.get(id);
+    getCell(id: string): CellDefinition<any> | undefined {
+        return this.cells.get(id);
+    }
+
+    registerResource (definition: ResourceDefinition): void {
+        this.resources.set(definition.id, definition);
+    }
+
+    getResource (id: string) {
+        return this.resources.get(id);
     }
 }

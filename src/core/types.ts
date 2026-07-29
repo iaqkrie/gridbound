@@ -14,11 +14,19 @@ export interface GameState {
     resources: ResourceGrid;
 }
 
+export interface ResourceDefinition {
+    id: string;
+
+    decayRule?: (currentAmount: number) => number;
+}
+
 export interface CycleContext<TState extends CellState = CellState> {
     state: TState;
     index: number;
 
     addResource: (resourceId: string, amount: number) => void;
+
+    transformTo: (newTypeId: string) => void;
 }
 
 export interface CellDefinition<TState extends CellState = CellState> {
