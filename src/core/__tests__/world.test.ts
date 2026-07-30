@@ -19,8 +19,8 @@ const farmCell: CellDefinition<FarmState> = {
 };
 
 const registry = new Registry();
-registry.register(emptyCell);
-registry.register(farmCell);
+registry.registerCell(emptyCell);
+registry.registerCell(farmCell);
 
 const world = new World(2, 2, registry, 'core:empty');
 

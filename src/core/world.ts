@@ -8,6 +8,7 @@ export class World {
     private registry: Registry;
 
     private nextResources: ResourceGrid = new Map();
+    private pendingTransformations: Map<number, string> = new Map();
 
     constructor (width: number, height: number, registry: Registry, defaultTypeId: string) {
         this.state = {
@@ -32,18 +33,18 @@ export class World {
         }
     }
 
-    private getOrCreateResourceLayer (grid: ResourceGrid, resourceId: string): Float32Array {
-        if (!grid.has(resourceId)) {
-            grid.set(resourceId, new Float32Array(this.state.width * this.state.height));
-        }
-
-        return grid.get(resourceId)!;
-    }
-
     nextCycle () {
         this.nextResources.clear();
         for (const [resId, layer] of this.state.resources.entries()) {
-            this.nextResources.set(resId, new Float32Array(layer));
+            const nextLayer = new Float32Array(layer.length);
+            const resDef = this.registry.getResource(resId);
+            const decayRule = resDef?.decayRule;
+
+            for (let i = 0; i < layer.length; i++) {
+                nextLayer[i] = decayRule ? decayRule(layer[i]) : layer[i];
+            }
+
+            this.nextResources.set(resId, nextLayer);
         }
 
         for (let i = 0; i < this.state.cells.length; i++) {
@@ -58,6 +59,10 @@ export class World {
                     addResource: (resourceId: string, amount: number) => {
                         const layer = this.getOrCreateResourceLayer(this.nextResources, resourceId)
                         layer[i] += amount;
+                    },
+
+                    transformTo: (newTypeId: string) => {
+                        this.pendingTransformations.set(i, newTypeId);
                     }
                 }
 
@@ -67,5 +72,23 @@ export class World {
 
         this.state.resources = this.nextResources;
         this.nextResources = new Map();
+
+        for (const [index, newTypeId] of this.pendingTransformations.entries()) {
+            const newDef = this.registry.getCell(newTypeId);
+            if (newDef) {
+                this.state.cells[index] = {
+                    typeId: newTypeId,
+                    state: newDef.createState()
+                };
+            }
+        }
+    }
+
+    private getOrCreateResourceLayer (grid: ResourceGrid, resourceId: string): Float32Array {
+        if (!grid.has(resourceId)) {
+            grid.set(resourceId, new Float32Array(this.state.width * this.state.height));
+        }
+
+        return grid.get(resourceId)!;
     }
 }
