@@ -29,8 +29,16 @@ export interface CycleContext<TState extends CellState = CellState> {
     transformTo: (newTypeId: string) => void;
 }
 
+export interface ClickContext<TState extends CellState = CellState> {
+    state: TState;
+    index: number;
+
+    transformTo: (newTypeId: string) => void;
+}
+
 export interface CellDefinition<TState extends CellState = CellState> {
     id: string;
     createState: () => TState;
     onCycle?: (ctx: CycleContext<TState>) => void;
+    onClick?: (ctx: ClickContext<TState>) => void;
 }

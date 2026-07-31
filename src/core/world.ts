@@ -1,6 +1,6 @@
 import { Registry } from "./registry";
 import { getCoords, getIndex, isValidCoord } from "./grid";
-import type { GameState, ResourceGrid, CycleContext } from "./types";
+import type { GameState, ResourceGrid, CycleContext, ClickContext } from "./types";
 
 export class World {
     public state: GameState;
@@ -81,6 +81,30 @@ export class World {
                     state: newDef.createState()
                 };
             }
+        }
+    }
+
+    interactCell (index: number) {
+        const cell = this.state.cells[index];
+        const definition = this.registry.getCell(cell.typeId);
+
+        if (definition && definition.onClick) {
+            const context: ClickContext<any> = {
+                state: cell.state,
+                index: index,
+
+                transformTo: (newTypeId: string) => {
+                    const newDef = this.registry.getCell(newTypeId);
+                    if (newDef) {
+                        this.state.cells[index] = {
+                            typeId: newTypeId,
+                            state: newDef.createState()
+                        }
+                    }
+                }
+            };
+
+            definition.onClick(context);
         }
     }
 
