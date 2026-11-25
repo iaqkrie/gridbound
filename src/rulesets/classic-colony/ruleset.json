@@ -1,0 +1,315 @@
+{
+  "schemaVersion": 1,
+  "id": "classic-colony",
+  "name": "Classic Colony",
+  "description": "Food, Wood, Stone, Population, and Moisture.",
+  "author": "iaqkrie & Gemini 4 Neon",
+  "boundaryMode": "bounded",
+  "defaultOverlayMode": "heatmap",
+  "defaultGridSize": { "width": 32, "height": 24 },
+  "defaultCellTypeId": "empty",
+  "initialCycles": 1,
+  "setupOptions": {
+    "mapSizes": [
+      { "id": "small", "name": "Small", "width": 16, "height": 12 },
+      { "id": "medium", "name": "Medium", "width": 32, "height": 24 },
+      { "id": "large", "name": "Large", "width": 64, "height": 48 }
+    ],
+    "allowSeed": true,
+    "params": [
+      {
+        "id": "terrainDensity",
+        "label": "Terrain Density",
+        "type": "select",
+        "defaultValue": "1",
+        "options": [
+          { "value": "0.65", "label": "Sparse" },
+          { "value": "1", "label": "Standard" },
+          { "value": "1.45", "label": "Rich" }
+        ]
+      }
+    ]
+  },
+  "worldGenerator": {
+    "ref": "builtin:clusters",
+    "params": {
+      "densityParamId": "terrainDensity",
+      "passes": [
+        {
+          "cellTypeId": "water",
+          "clustersPer768": 9,
+          "minClusters": 3,
+          "minSize": 2,
+          "maxSize": 5,
+          "onlyOnEmpty": false
+        },
+        {
+          "cellTypeId": "mountain",
+          "clustersPer768": 8,
+          "minClusters": 3,
+          "minSize": 2,
+          "maxSize": 5,
+          "onlyOnEmpty": true
+        },
+        {
+          "cellTypeId": "forest",
+          "clustersPer768": 14,
+          "minClusters": 5,
+          "minSize": 3,
+          "maxSize": 6,
+          "onlyOnEmpty": true
+        }
+      ]
+    }
+  },
+  "resources": [
+    {
+      "id": "money",
+      "name": "Money",
+      "shortName": "Money",
+      "description": "Currency from fed Houses.",
+      "color": "#F59E0B",
+      "kind": "unlimited",
+      "initialValue": 35
+    },
+    {
+      "id": "food",
+      "name": "Food",
+      "shortName": "Food",
+      "description": "Farm +3, House −1.",
+      "color": "#84CC16",
+      "kind": "capped",
+      "initialValue": 0,
+      "initialMax": 100,
+      "tags": ["storable"]
+    },
+    {
+      "id": "wood",
+      "name": "Wood",
+      "shortName": "Wood",
+      "description": "Sawmill +3.",
+      "color": "#A16207",
+      "kind": "capped",
+      "initialValue": 10,
+      "initialMax": 100,
+      "tags": ["storable"]
+    },
+    {
+      "id": "stone",
+      "name": "Stone",
+      "shortName": "Stone",
+      "description": "Quarry +2.",
+      "color": "#94A3B8",
+      "kind": "capped",
+      "initialValue": 0,
+      "initialMax": 100,
+      "tags": ["storable"]
+    },
+    {
+      "id": "population",
+      "name": "Population",
+      "shortName": "Pop",
+      "description": "Free / max workers.",
+      "color": "#38BDF8",
+      "kind": "capped",
+      "initialValue": 1,
+      "initialMax": 1
+    }
+  ],
+  "supplies": [
+    {
+      "id": "moisture",
+      "name": "Moisture",
+      "description": "Irrigates Farms.",
+      "color": "#0EA5E9",
+      "maxExpected": 6,
+      "decay": { "kind": "clear" }
+    }
+  ],
+  "cellTypes": [
+    {
+      "id": "empty",
+      "name": "Empty",
+      "description": "",
+      "shortRule": "",
+      "visual": { "color": "#111720", "glyph": "empty" },
+      "onClick": {
+        "left": {
+          "kind": "openBuildMenu",
+          "options": ["farm", "house", "warehouse"]
+        }
+      }
+    },
+    {
+      "id": "water",
+      "name": "Water",
+      "description": "",
+      "shortRule": "+2 Moisture (r=2)",
+      "visual": { "color": "#0EA5E9", "glyph": "water" },
+      "emissions": [
+        {
+          "supplyId": "moisture",
+          "amount": 2,
+          "radius": 2,
+          "neighborhood": "moore",
+          "includeSelf": true
+        }
+      ]
+    },
+    {
+      "id": "forest",
+      "name": "Forest",
+      "description": "",
+      "shortRule": "",
+      "visual": { "color": "#15803D", "glyph": "forest" },
+      "onClick": {
+        "left": {
+          "kind": "openBuildMenu",
+          "options": ["sawmill"]
+        }
+      }
+    },
+    {
+      "id": "mountain",
+      "name": "Mountain",
+      "description": "",
+      "shortRule": "",
+      "visual": { "color": "#64748B", "glyph": "mountain" },
+      "onClick": {
+        "left": {
+          "kind": "openBuildMenu",
+          "options": ["quarry"]
+        }
+      }
+    },
+    {
+      "id": "farm",
+      "name": "Farm",
+      "description": "",
+      "shortRule": "+3 Food / cycle",
+      "visual": { "color": "#10B981", "glyph": "farm" },
+      "buildCost": { "money": 5 },
+      "onDemolishEffect": { "money": 2 },
+      "onClick": {
+        "left": { "kind": "openPanel" },
+        "right": { "kind": "openDemolishConfirm" }
+      },
+      "behavior": {
+        "ref": "builtin:producer",
+        "params": {
+          "outputResourceId": "food",
+          "outputAmount": 3,
+          "requiredSupplyId": "moisture",
+          "requiredSupplyAmount": 1,
+          "workerResourceId": "population",
+          "idleWarningCycles": 2
+        }
+      },
+      "panel": "builtin:workerPanel"
+    },
+    {
+      "id": "sawmill",
+      "name": "Sawmill",
+      "description": "",
+      "shortRule": "+3 Wood / cycle",
+      "visual": {
+        "color": "#B45309",
+        "glyph": "sawmill",
+        "substrateColor": "#15803D"
+      },
+      "buildCost": { "money": 6 },
+      "onDemolishEffect": { "money": 3 },
+      "demolishTo": "forest",
+      "onClick": {
+        "left": { "kind": "openPanel" },
+        "right": { "kind": "openDemolishConfirm" }
+      },
+      "behavior": {
+        "ref": "builtin:producer",
+        "params": {
+          "outputResourceId": "wood",
+          "outputAmount": 3,
+          "workerResourceId": "population",
+          "idleWarningCycles": 2
+        }
+      },
+      "panel": "builtin:workerPanel"
+    },
+    {
+      "id": "quarry",
+      "name": "Quarry",
+      "description": "",
+      "shortRule": "+2 Stone / cycle",
+      "visual": {
+        "color": "#CBD5E1",
+        "glyph": "quarry",
+        "substrateColor": "#64748B"
+      },
+      "buildCost": { "money": 8, "wood": 6 },
+      "onDemolishEffect": { "money": 4, "wood": 3 },
+      "demolishTo": "mountain",
+      "onClick": {
+        "left": { "kind": "openPanel" },
+        "right": { "kind": "openDemolishConfirm" }
+      },
+      "behavior": {
+        "ref": "builtin:producer",
+        "params": {
+          "outputResourceId": "stone",
+          "outputAmount": 2,
+          "workerResourceId": "population",
+          "idleWarningCycles": 2
+        }
+      },
+      "panel": "builtin:workerPanel"
+    },
+    {
+      "id": "house",
+      "name": "House",
+      "description": "",
+      "shortRule": "−1 Food → +1 Money",
+      "visual": { "color": "#CBD5E1", "glyph": "house" },
+      "buildCost": { "money": 6, "wood": 4 },
+      "capBonus": { "population": 1 },
+      "onBuildEffect": { "population": 1 },
+      "onDemolishEffect": { "money": 3, "wood": 2 },
+      "onClick": {
+        "right": { "kind": "openDemolishConfirm" }
+      },
+      "behavior": {
+        "ref": "builtin:consumer",
+        "params": {
+          "consumeResourceId": "food",
+          "consumeAmount": 1,
+          "incomeResourceId": "money",
+          "incomeAmount": 1,
+          "maxStarveCycles": 3,
+          "starveToCellTypeId": "empty",
+          "reclaimResourceId": "population",
+          "reclaimAmount": 1
+        }
+      }
+    },
+    {
+      "id": "warehouse",
+      "name": "Warehouse",
+      "description": "",
+      "shortRule": "+100 resource cap",
+      "visual": { "color": "#818CF8", "glyph": "warehouse" },
+      "buildCost": { "money": 10, "wood": 8, "stone": 6 },
+      "onDemolishEffect": { "money": 5, "wood": 4, "stone": 3 },
+      "onClick": {
+        "left": { "kind": "openPanel" },
+        "right": { "kind": "openDemolishConfirm" }
+      },
+      "behavior": {
+        "ref": "builtin:storage",
+        "params": {
+          "bonusAmount": 100,
+          "resourceTag": "storable"
+        }
+      },
+      "panel": "builtin:storagePanel"
+    }
+  ]
+}

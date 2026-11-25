@@ -1,0 +1,8 @@
+{
+  "name": "CellGrid",
+  "description": "Клеточный стратегический движок на базе Снабжений (Supplies) с наборами правил «Игра Жизнь» и «Ферма и Дом».",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
