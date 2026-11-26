@@ -1,34 +1,44 @@
 import { t } from '../i18n';
 import {
+  Action,
   AffordabilityCheck,
-  BoundaryMode,
-  CellClickAction,
   CellInspection,
   CellNotification,
   CellStateData,
   CellTypeId,
-  CompiledRuleset,
+  CellTypeManifest,
+  ClickExecutionResult,
   DemolishInfo,
   GridCoordinate,
   GridMutator,
   MouseButton,
-  ResolvedCellType,
+  MutableRuleWorld,
   ResourceDelta,
   ResourceId,
   ResourceProjectionBreakdown,
+  ResolvedVisualState,
+  RuleEvalContext,
   RulesetManifest,
   SerializedSimulationState,
   SimulationStats,
+  StatusBadge,
   StepResult,
   SupplyEmission,
   SupplyId,
   SupplyManifest,
-  WorldApi,
-  WorldCellSnapshot,
   WorldSetupValues,
   applyDecayRule,
   createSeededRng,
+  deriveBuildPreview,
+  deriveCycleExplanation,
+  deriveDemolishInfo,
+  evaluateCycleRules,
+  executeWorldRules,
+  extractStaticEmissions,
   generateRandomSeed,
+  resolveCellBadge,
+  resolveCellVisual,
+  runWorldGeneratorPipeline,
 } from './sdk';
 
 function addDelta(target: ResourceDelta, delta: ResourceDelta | undefined): void {
@@ -40,11 +50,11 @@ function addDelta(target: ResourceDelta, delta: ResourceDelta | undefined): void
 }
 
 /**
- * Pure Ruleset-Agnostic Cellular Strategy Engine Core.
+ * Pure Ruleset-Agnostic Cellular Strategy Engine Core (Schema v2).
  *
- * The core has ZERO hardcoded knowledge of specific mechanics like population,
- * workers, hunger, or storage. Global resources are strictly 'unlimited' or
- * 'capped', and all custom cell logic lives in modular TS behaviors & TSX panels.
+ * Bounded grid, strictly 'unlimited' | 'capped' global resources, and a
+ * declarative Rule/Condition/Action interpreter powering cell logic, clicks,
+ * passive modifiers, visual overlays, panels, and world generation.
  *
  * 3-Phase Buffer Cycle Pipeline:
  *   Phase 1 — Consume, React & Transition
@@ -52,21 +62,19 @@ function addDelta(target: ResourceDelta, delta: ResourceDelta | undefined): void
  *   Phase 3 — Produce (spatial emissions & next-cycle global resources)
  */
 export class SimulationCore {
-  public readonly compiled: CompiledRuleset;
   public readonly manifest: RulesetManifest;
   public readonly width: number;
   public readonly height: number;
-  public readonly boundaryMode: BoundaryMode;
   public readonly seed: string;
 
   private currentGrid: Uint8Array;
   private nextGrid: Uint8Array;
   private cellStates: (CellStateData | null)[];
   private nextCellStates: (CellStateData | null)[];
-  private emitFlags: Uint8Array;
+  private pendingEmissions: SupplyEmission[][];
   private supplyBuffers: Map<SupplyId, Int16Array>;
   private supplyDefsById: Map<SupplyId, SupplyManifest>;
-  private cellTypeByIndex: ResolvedCellType[];
+  private cellTypeByIndex: CellTypeManifest[];
   private cellIndexById: Map<CellTypeId, number>;
   private defaultCellIndex: number;
   private resources: Record<ResourceId, number>;
@@ -74,28 +82,26 @@ export class SimulationCore {
   private cycleCount = 0;
 
   constructor(
-    compiled: CompiledRuleset,
+    manifest: RulesetManifest,
     width?: number,
     height?: number,
     seed?: string
   ) {
-    this.compiled = compiled;
-    this.manifest = compiled.manifest;
-    this.width = width ?? compiled.manifest.defaultGridSize.width;
-    this.height = height ?? compiled.manifest.defaultGridSize.height;
-    this.boundaryMode = compiled.manifest.boundaryMode;
+    this.manifest = manifest;
+    this.width = width ?? manifest.defaultGridSize.width;
+    this.height = height ?? manifest.defaultGridSize.height;
     this.seed = seed?.trim() || generateRandomSeed();
 
-    this.cellTypeByIndex = [...compiled.cellTypes];
+    this.cellTypeByIndex = [...manifest.cellTypes];
     this.cellIndexById = new Map();
     this.cellTypeByIndex.forEach((def, idx) => {
       this.cellIndexById.set(def.id, idx);
     });
 
-    const defIdx = this.cellIndexById.get(compiled.manifest.defaultCellTypeId);
+    const defIdx = this.cellIndexById.get(manifest.defaultCellTypeId);
     if (defIdx === undefined) {
       throw new Error(
-        `Unknown defaultCellTypeId: ${compiled.manifest.defaultCellTypeId}`
+        `Unknown defaultCellTypeId: ${manifest.defaultCellTypeId}`
       );
     }
     this.defaultCellIndex = defIdx;
@@ -105,27 +111,26 @@ export class SimulationCore {
     this.nextGrid = new Uint8Array(total);
     this.cellStates = new Array(total).fill(null);
     this.nextCellStates = new Array(total).fill(null);
-    this.emitFlags = new Uint8Array(total);
+    this.pendingEmissions = new Array(total);
     this.currentGrid.fill(this.defaultCellIndex);
 
     this.resources = {};
-    for (const res of compiled.manifest.resources) {
+    for (const res of manifest.resources) {
       this.resources[res.id] = res.initialValue;
     }
 
     this.supplyBuffers = new Map();
     this.supplyDefsById = new Map();
-    for (const supply of compiled.manifest.supplies) {
+    for (const supply of manifest.supplies) {
       this.supplyBuffers.set(supply.id, new Int16Array(total));
       this.supplyDefsById.set(supply.id, supply);
     }
   }
 
   public static createNewGame(
-    compiled: CompiledRuleset,
+    manifest: RulesetManifest,
     setup?: Partial<WorldSetupValues>
   ): SimulationCore {
-    const manifest = compiled.manifest;
     const width = setup?.width ?? manifest.defaultGridSize.width;
     const height = setup?.height ?? manifest.defaultGridSize.height;
     const seed = setup?.seed?.trim() || generateRandomSeed();
@@ -136,7 +141,7 @@ export class SimulationCore {
     }
     const mergedParams = { ...defaultParams, ...(setup?.params ?? {}) };
 
-    const core = new SimulationCore(compiled, width, height, seed);
+    const core = new SimulationCore(manifest, width, height, seed);
     core.generateNewMap({
       width,
       height,
@@ -152,10 +157,10 @@ export class SimulationCore {
   }
 
   public static deserialize(
-    compiled: CompiledRuleset,
+    manifest: RulesetManifest,
     snapshot: SerializedSimulationState
   ): SimulationCore {
-    const core = new SimulationCore(compiled, snapshot.width, snapshot.height);
+    const core = new SimulationCore(manifest, snapshot.width, snapshot.height);
     const total = core.width * core.height;
 
     for (let i = 0; i < total && i < snapshot.grid.length; i++) {
@@ -177,13 +182,13 @@ export class SimulationCore {
 
     core.cycleCount = snapshot.cycle;
 
-    for (const res of compiled.manifest.resources) {
+    for (const res of manifest.resources) {
       const savedVal = snapshot.resources[res.id];
       core.resources[res.id] =
         typeof savedVal === 'number' ? savedVal : res.initialValue;
     }
 
-    for (const supply of compiled.manifest.supplies) {
+    for (const supply of manifest.supplies) {
       const buffer = core.supplyBuffers.get(supply.id);
       const savedArr = snapshot.supplies?.[supply.id];
       if (!buffer || !savedArr) continue;
@@ -219,15 +224,8 @@ export class SimulationCore {
     };
   }
 
-  private createCellInitialState(def: ResolvedCellType): CellStateData | null {
-    const fromBehavior = def.behavior?.module.createInitialState
-      ? def.behavior.module.createInitialState(def.behavior.params)
-      : null;
-    if (!def.initialState && !fromBehavior) return null;
-    return {
-      ...(fromBehavior ?? {}),
-      ...(def.initialState ?? {}),
-    };
+  private createCellInitialState(def: CellTypeManifest): CellStateData | null {
+    return def.initialState ? { ...def.initialState } : null;
   }
 
   public get cycle(): number {
@@ -265,26 +263,19 @@ export class SimulationCore {
     const total = this.currentGrid.length;
     for (let i = 0; i < total; i++) {
       const def = this.cellTypeByIndex[this.currentGrid[i]];
+      if (!def.modifiers || def.modifiers.length === 0) continue;
+      const st = this.cellStates[i];
 
-      if (def.capBonus) {
-        for (const [resId, extra] of Object.entries(def.capBonus)) {
-          if (!extra) continue;
-          if (caps[resId] !== null && caps[resId] !== undefined) {
-            caps[resId] = (caps[resId] as number) + extra;
-          }
-        }
-      }
-
-      const dynamicCapFn = def.behavior?.module.getCapBonus;
-      if (dynamicCapFn && def.behavior) {
-        const bonus = dynamicCapFn(this.cellStates[i] ?? {}, def.behavior.params);
-        if (bonus) {
-          for (const [resId, extra] of Object.entries(bonus)) {
-            if (!extra) continue;
-            if (caps[resId] !== null && caps[resId] !== undefined) {
-              caps[resId] = (caps[resId] as number) + extra;
-            }
-          }
+      for (const mod of def.modifiers) {
+        if (mod.type !== 'capBonus' || !mod.amount) continue;
+        const resId =
+          mod.resource ??
+          (mod.resourceFromState
+            ? String(st?.[mod.resourceFromState] ?? '')
+            : '');
+        if (!resId) continue;
+        if (caps[resId] !== null && caps[resId] !== undefined) {
+          caps[resId] = (caps[resId] as number) + mod.amount;
         }
       }
     }
@@ -329,19 +320,7 @@ export class SimulationCore {
     return x >= 0 && x < this.width && y >= 0 && y < this.height;
   }
 
-  public resolveCoordinate(x: number, y: number): GridCoordinate | null {
-    if (this.boundaryMode === 'toroidal') {
-      const rx = ((x % this.width) + this.width) % this.width;
-      const ry = ((y % this.height) + this.height) % this.height;
-      return { x: rx, y: ry };
-    }
-    if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
-      return null;
-    }
-    return { x, y };
-  }
-
-  public getCellTypeAt(x: number, y: number): ResolvedCellType {
+  public getCellTypeAt(x: number, y: number): CellTypeManifest {
     const idx = this.currentGrid[y * this.width + x];
     return this.cellTypeByIndex[idx];
   }
@@ -359,7 +338,7 @@ export class SimulationCore {
     this.cellStates[idx] = { ...current, ...patch };
   }
 
-  public getCellTypeById(id: CellTypeId): ResolvedCellType | undefined {
+  public getCellTypeById(id: CellTypeId): CellTypeManifest | undefined {
     const idx = this.cellIndexById.get(id);
     return idx !== undefined ? this.cellTypeByIndex[idx] : undefined;
   }
@@ -368,7 +347,7 @@ export class SimulationCore {
     return this.currentGrid;
   }
 
-  public getCellTypes(): readonly ResolvedCellType[] {
+  public getCellTypes(): readonly CellTypeManifest[] {
     return this.cellTypeByIndex;
   }
 
@@ -380,17 +359,6 @@ export class SimulationCore {
     const buffer = this.supplyBuffers.get(supplyId);
     if (!buffer || !this.inBounds(x, y)) return 0;
     return buffer[y * this.width + x];
-  }
-
-  public setSupplyAt(
-    x: number,
-    y: number,
-    supplyId: SupplyId,
-    amount: number
-  ): void {
-    const buffer = this.supplyBuffers.get(supplyId);
-    if (!buffer || !this.inBounds(x, y)) return;
-    buffer[y * this.width + x] = Math.max(0, Math.floor(amount));
   }
 
   public getLocalSupplies(x: number, y: number): Record<SupplyId, number> {
@@ -414,47 +382,85 @@ export class SimulationCore {
     return true;
   }
 
-  public findCells(
-    predicate: (cell: WorldCellSnapshot) => boolean
-  ): WorldCellSnapshot[] {
-    const matches: WorldCellSnapshot[] = [];
+  public countNeighbors(
+    x: number,
+    y: number,
+    cellTypeId: CellTypeId,
+    radius = 1,
+    neighborhood: 'moore' | 'vonNeumann' = 'moore'
+  ): number {
+    const targetIdx = this.cellIndexById.get(cellTypeId);
+    if (targetIdx === undefined) return 0;
+    let count = 0;
     const w = this.width;
-    const total = this.currentGrid.length;
-    for (let i = 0; i < total; i++) {
-      const x = i % w;
-      const y = (i - x) / w;
-      const snap: WorldCellSnapshot = {
-        x,
-        y,
-        cellTypeId: this.cellTypeByIndex[this.currentGrid[i]].id,
-        state: this.cellStates[i] ? { ...this.cellStates[i]! } : {},
-      };
-      if (predicate(snap)) {
-        matches.push(snap);
+    const h = this.height;
+
+    for (let dy = -radius; dy <= radius; dy++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= h) continue;
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        if (neighborhood === 'vonNeumann' && Math.abs(dx) + Math.abs(dy) > radius) {
+          continue;
+        }
+        const nx = x + dx;
+        if (nx < 0 || nx >= w) continue;
+        if (this.currentGrid[ny * w + nx] === targetIdx) {
+          count++;
+        }
       }
     }
-    return matches;
+    return count;
   }
 
-  public getWorldApi(): WorldApi {
+  private reclaimFromCells(stateKey: string, amount: number): void {
+    let remaining = Math.max(0, Math.floor(amount));
+    if (remaining === 0) return;
+
+    for (let i = this.currentGrid.length - 1; i >= 0 && remaining > 0; i--) {
+      const st = this.cellStates[i];
+      if (!st) continue;
+      const cur = Number(st[stateKey] ?? 0);
+      if (cur <= 0) continue;
+      const take = Math.min(cur, remaining);
+      st[stateKey] = cur - take;
+      remaining -= take;
+    }
+  }
+
+  private createMutableWorld(): MutableRuleWorld {
     return {
-      width: this.width,
-      height: this.height,
-      cycle: this.cycleCount,
-      manifest: this.manifest,
       getResource: (id) => this.getResource(id),
-      getResourceCap: (id) => this.getResourceCap(id),
-      getResources: () => this.getResources(),
-      getResourceCaps: () => this.getResourceCaps(),
       addResource: (id, delta) => this.addResource(id, delta),
       consumeResource: (id, amount) => this.consumeResource(id, amount),
-      getCellTypeIdAt: (x, y) => this.getCellTypeAt(x, y).id,
+      setCell: (x, y, cellTypeId) => this.setCell(x, y, cellTypeId),
       getCellStateAt: (x, y) => this.getCellStateAt(x, y),
       patchCellState: (x, y, patch) => this.patchCellState(x, y, patch),
-      getLocalSupplies: (x, y) => this.getLocalSupplies(x, y),
-      clearNotificationsAt: (x, y) => this.clearNotificationsAt(x, y),
+      reclaimFromCells: (stateKey, amount) =>
+        this.reclaimFromCells(stateKey, amount),
       reconcileResourceCaps: () => this.reconcileResourceCaps(),
-      findCells: (pred) => this.findCells(pred),
+    };
+  }
+
+  public createEvalContext(
+    x: number,
+    y: number,
+    overrides?: Partial<RuleEvalContext>
+  ): RuleEvalContext {
+    const cellType = overrides?.cellType ?? this.getCellTypeAt(x, y);
+    return {
+      x,
+      y,
+      cycle: this.cycleCount,
+      seed: this.seed,
+      cellType,
+      state: overrides?.state ?? this.getCellStateAt(x, y),
+      supplies: overrides?.supplies ?? this.getLocalSupplies(x, y),
+      resources: overrides?.resources ?? this.getResources(),
+      resourceCaps: overrides?.resourceCaps ?? this.getResourceCaps(),
+      manifest: this.manifest,
+      countNeighbors: (cx, cy, cid, r, nb) =>
+        this.countNeighbors(cx, cy, cid, r, nb),
     };
   }
 
@@ -475,6 +481,7 @@ export class SimulationCore {
     const mutator: GridMutator = {
       width: this.width,
       height: this.height,
+      defaultCellTypeId: this.manifest.defaultCellTypeId,
       clear: () => {
         this.currentGrid.fill(this.defaultCellIndex);
         this.cellStates.fill(null);
@@ -495,36 +502,38 @@ export class SimulationCore {
       params: {},
     };
     const rng = createSeededRng(resolvedSetup.seed);
-    this.compiled.generator.fn(
+    runWorldGeneratorPipeline(
+      this.manifest.worldGenerator,
       mutator,
       resolvedSetup,
-      this.compiled.generator.params,
       rng
     );
   }
 
-  public canAfford(cellTypeId: CellTypeId): AffordabilityCheck {
-    const def = this.getCellTypeById(cellTypeId);
-    if (!def || !def.buildCost) {
-      return { ok: true, missing: [] };
-    }
+  public canAffordCost(cost: ResourceDelta | undefined): AffordabilityCheck {
+    if (!cost) return { ok: true, missing: [] };
 
     const missing: AffordabilityCheck['missing'] = [];
-    for (const [resId, cost] of Object.entries(def.buildCost)) {
-      if (cost <= 0) continue;
+    for (const [resId, need] of Object.entries(cost)) {
+      if (need <= 0) continue;
       const have = this.resources[resId] ?? 0;
-      if (have < cost) {
+      if (have < need) {
         const resDef = this.manifest.resources.find((r) => r.id === resId);
         missing.push({
           resourceId: resId,
           resourceName: resDef?.name ?? resId,
-          need: cost,
+          need,
           have,
         });
       }
     }
 
     return { ok: missing.length === 0, missing };
+  }
+
+  public canAfford(cellTypeId: CellTypeId): AffordabilityCheck {
+    const def = this.getCellTypeById(cellTypeId);
+    return this.canAffordCost(def?.buildCost);
   }
 
   private applyResourceDelta(
@@ -570,84 +579,136 @@ export class SimulationCore {
     }
 
     this.setCell(x, y, cellTypeId);
-    this.applyResourceDelta(def.onBuildEffect);
 
-    if (def.behavior?.module.onBuild) {
-      def.behavior.module.onBuild(
-        {
-          x,
-          y,
-          cellType: def,
-          state: this.getCellStateAt(x, y),
-          world: this.getWorldApi(),
-        },
-        def.behavior.params
-      );
-    }
-
-    return { ok: true };
-  }
-
-  public demolishCell(
-    x: number,
-    y: number
-  ): { ok: boolean; delta: ResourceDelta } {
-    if (!this.inBounds(x, y)) {
-      return { ok: false, delta: {} };
-    }
-    const current = this.getCellTypeAt(x, y);
-    if (
-      !current.onDemolishEffect &&
-      !current.behavior?.module.onDemolish &&
-      current.onClick.right.kind !== 'openDemolishConfirm'
-    ) {
-      return { ok: false, delta: {} };
-    }
-
-    const prevState = this.getCellStateAt(x, y);
-    const delta = { ...(current.onDemolishEffect ?? {}) };
-    const targetCellId = current.demolishTo ?? this.manifest.defaultCellTypeId;
-
-    this.setCell(x, y, targetCellId);
-
-    if (current.behavior?.module.onDemolish) {
-      current.behavior.module.onDemolish(
-        {
-          x,
-          y,
-          cellType: current,
-          state: prevState,
-          world: this.getWorldApi(),
-        },
-        current.behavior.params
-      );
+    if (def.onBuild && def.onBuild.length > 0) {
+      const ctx = this.createEvalContext(x, y, { cellType: def });
+      executeWorldRules(def.onBuild, ctx, this.createMutableWorld());
     }
 
     this.reconcileResourceCaps();
-    this.applyResourceDelta(delta);
-    this.clearNotificationsAt(x, y);
+    return { ok: true };
+  }
 
-    return { ok: true, delta };
+  public demolishCell(x: number, y: number): { ok: boolean } {
+    if (!this.inBounds(x, y)) return { ok: false };
+    const current = this.getCellTypeAt(x, y);
+    const hasDemolish =
+      (current.onDemolish && current.onDemolish.length > 0) ||
+      (current.onClick?.right ?? []).some((r) =>
+        r.do.some((a) => a.type === 'openDemolishConfirm')
+      );
+    if (!hasDemolish) return { ok: false };
+
+    const prevState = this.getCellStateAt(x, y);
+    const targetCellId = current.demolishTo ?? this.manifest.defaultCellTypeId;
+    const ctx = this.createEvalContext(x, y, {
+      cellType: current,
+      state: prevState,
+    });
+
+    this.setCell(x, y, targetCellId);
+
+    if (current.onDemolish && current.onDemolish.length > 0) {
+      executeWorldRules(current.onDemolish, ctx, this.createMutableWorld());
+    }
+
+    this.reconcileResourceCaps();
+    this.clearNotificationsAt(x, y);
+    return { ok: true };
   }
 
   public getDemolishInfo(x: number, y: number): DemolishInfo {
-    if (!this.inBounds(x, y)) return {};
+    if (!this.inBounds(x, y)) return { lines: [], warnings: [] };
     const cellType = this.getCellTypeAt(x, y);
-    if (!cellType.behavior?.module.getDemolishInfo) return {};
+    return deriveDemolishInfo(cellType, this.createEvalContext(x, y));
+  }
 
-    return cellType.behavior.module.getDemolishInfo(
-      {
-        x,
-        y,
-        cellType,
-        state: this.getCellStateAt(x, y),
-        supplies: this.getLocalSupplies(x, y),
-        resources: this.getResources(),
-        resourceCaps: this.getResourceCaps(),
-        manifest: this.manifest,
-      },
-      cellType.behavior.params
-    );
+  public getBuildPreview(
+    x: number,
+    y: number,
+    cellTypeId: CellTypeId
+  ): StatusBadge | null {
+    if (!this.inBounds(x, y)) return null;
+    const def = this.getCellTypeById(cellTypeId);
+    if (!def) return null;
+    return deriveBuildPreview(def, this.createEvalContext(x, y, { cellType: def }));
+  }
+
+  public resolveVisualAt(x: number, y: number): ResolvedVisualState {
+    const cellType = this.getCellTypeAt(x, y);
+    return resolveCellVisual(cellType, this.createEvalContext(x, y));
+  }
+
+  public transferPanelResource(
+    x: number,
+    y: number,
+    resourceId: ResourceId,
+    stateKey: string,
+    delta: number,
+    min: number,
+    max: number,
+    resetKeys?: string[],
+    clearNotifications?: boolean
+  ): boolean {
+    if (!this.inBounds(x, y) || delta === 0) return false;
+    const state = this.getCellStateAt(x, y);
+    const cur = Number(state[stateKey] ?? 0);
+    const next = cur + delta;
+    if (next < min || next > max) return false;
+
+    if (delta > 0) {
+      if (!this.consumeResource(resourceId, delta)) return false;
+    } else {
+      this.addResource(resourceId, Math.abs(delta));
+    }
+
+    const patch: CellStateData = { [stateKey]: next };
+    if (delta > 0 && resetKeys) {
+      for (const k of resetKeys) {
+        patch[k] = 0;
+      }
+    }
+    this.patchCellState(x, y, patch);
+    if (delta > 0 && clearNotifications) {
+      this.clearNotificationsAt(x, y);
+    }
+    this.reconcileResourceCaps();
+    return true;
+  }
+
+  public selectPanelResource(
+    x: number,
+    y: number,
+    stateKey: string,
+    resourceId: ResourceId
+  ): boolean {
+    if (!this.inBounds(x, y)) return false;
+    this.patchCellState(x, y, { [stateKey]: resourceId });
+    this.reconcileResourceCaps();
+    return true;
+  }
+
+  public executePanelAction(
+    x: number,
+    y: number,
+    cost: ResourceDelta | undefined,
+    actions: readonly Action[]
+  ): boolean {
+    if (!this.inBounds(x, y)) return false;
+    if (!this.canAffordCost(cost).ok) return false;
+
+    if (cost) {
+      for (const [resId, amt] of Object.entries(cost)) {
+        if (amt > 0) {
+          this.resources[resId] = (this.resources[resId] ?? 0) - amt;
+        }
+      }
+    }
+
+    const ctx = this.createEvalContext(x, y);
+    executeWorldRules([{ do: [...actions] }], ctx, this.createMutableWorld());
+    this.reconcileResourceCaps();
+    return true;
   }
 
   private applyEmission(
@@ -656,16 +717,16 @@ export class SimulationCore {
     emission: SupplyEmission,
     producedTotals?: Record<SupplyId, number>
   ): void {
-    const buffer = this.supplyBuffers.get(emission.supplyId);
-    const def = this.supplyDefsById.get(emission.supplyId);
+    const buffer = this.supplyBuffers.get(emission.id);
+    const def = this.supplyDefsById.get(emission.id);
     if (!buffer || !def) return;
 
     const w = this.width;
     const h = this.height;
-    const isToroidal = this.boundaryMode === 'toroidal';
     const r = emission.radius;
     const amount = emission.amount;
     const maxCap = def.maxAmount;
+    const includeSelf = emission.includeSelf ?? true;
 
     const deposit = (idx: number) => {
       const prev = buffer[idx];
@@ -673,8 +734,8 @@ export class SimulationCore {
         maxCap !== undefined ? Math.min(maxCap, prev + amount) : prev + amount;
       buffer[idx] = next;
       if (producedTotals && next > prev) {
-        producedTotals[emission.supplyId] =
-          (producedTotals[emission.supplyId] ?? 0) + (next - prev);
+        producedTotals[emission.id] =
+          (producedTotals[emission.id] ?? 0) + (next - prev);
       }
     };
 
@@ -684,25 +745,18 @@ export class SimulationCore {
     }
 
     for (let dy = -r; dy <= r; dy++) {
+      const ty = y + dy;
+      if (ty < 0 || ty >= h) continue;
       for (let dx = -r; dx <= r; dx++) {
-        if (!emission.includeSelf && dx === 0 && dy === 0) continue;
+        if (!includeSelf && dx === 0 && dy === 0) continue;
         if (
           emission.neighborhood === 'vonNeumann' &&
           Math.abs(dx) + Math.abs(dy) > r
         ) {
           continue;
         }
-
-        let tx = x + dx;
-        let ty = y + dy;
-
-        if (isToroidal) {
-          tx = ((tx % w) + w) % w;
-          ty = ((ty % h) + h) % h;
-        } else if (tx < 0 || tx >= w || ty < 0 || ty >= h) {
-          continue;
-        }
-
+        const tx = x + dx;
+        if (tx < 0 || tx >= w) continue;
         deposit(ty * w + tx);
       }
     }
@@ -720,17 +774,11 @@ export class SimulationCore {
     indices.sort((a, b) => {
       const defA = this.cellTypeByIndex[this.currentGrid[a]];
       const defB = this.cellTypeByIndex[this.currentGrid[b]];
-      const prioA = defA.behavior?.module.getConsumePriority
-        ? defA.behavior.module.getConsumePriority(
-            this.cellStates[a] ?? {},
-            defA.behavior.params
-          )
+      const prioA = defA.priorityByState
+        ? Number(this.cellStates[a]?.[defA.priorityByState] ?? 0)
         : 0;
-      const prioB = defB.behavior?.module.getConsumePriority
-        ? defB.behavior.module.getConsumePriority(
-            this.cellStates[b] ?? {},
-            defB.behavior.params
-          )
+      const prioB = defB.priorityByState
+        ? Number(this.cellStates[b]?.[defB.priorityByState] ?? 0)
         : 0;
       if (prioB !== prioA) return prioB - prioA;
       return a - b;
@@ -749,36 +797,6 @@ export class SimulationCore {
     }
   }
 
-  private evaluateCellTick(
-    x: number,
-    y: number,
-    cellType: ResolvedCellType,
-    state: CellStateData,
-    localSupplies: Record<SupplyId, number>,
-    availableResources: Record<ResourceId, number>,
-    resourceCaps: Record<ResourceId, number | null>
-  ) {
-    if (!cellType.behavior?.module.onCycle) {
-      return {
-        nextTypeId: cellType.id,
-        canEmit: cellType.emissions.length > 0,
-      };
-    }
-    return cellType.behavior.module.onCycle(
-      {
-        x,
-        y,
-        cellType,
-        state,
-        supplies: localSupplies,
-        resources: availableResources,
-        resourceCaps,
-        manifest: this.manifest,
-      },
-      cellType.behavior.params
-    );
-  }
-
   public step(): StepResult {
     const w = this.width;
     const h = this.height;
@@ -794,7 +812,7 @@ export class SimulationCore {
     const lostCells: {
       x: number;
       y: number;
-      cellType: ResolvedCellType;
+      cellType: CellTypeManifest;
       state: CellStateData;
     }[] = [];
 
@@ -803,7 +821,7 @@ export class SimulationCore {
       producedTotals[supply.id] = 0;
     }
 
-    this.emitFlags.fill(0);
+    this.pendingEmissions.fill([]);
     this.nextGrid.fill(this.defaultCellIndex);
     this.nextCellStates.fill(null);
 
@@ -829,42 +847,40 @@ export class SimulationCore {
 
       const currentType = this.cellTypeByIndex[this.currentGrid[i]];
       const currentState = this.cellStates[i] ?? {};
-      const outcome = this.evaluateCellTick(
-        x,
-        y,
+      const outcome = evaluateCycleRules(
         currentType,
-        currentState,
-        localSupplies,
-        availableResources,
-        initialCaps
+        this.createEvalContext(x, y, {
+          cellType: currentType,
+          state: currentState,
+          supplies: localSupplies,
+          resources: availableResources,
+          resourceCaps: initialCaps,
+        })
       );
 
-      if (outcome.consumed) {
-        for (const [supplyId, reqAmount] of Object.entries(outcome.consumed)) {
-          if (reqAmount <= 0) continue;
-          const buf = this.supplyBuffers.get(supplyId);
-          if (!buf) continue;
-          const actual = Math.min(buf[i], reqAmount);
-          if (actual > 0) {
-            buf[i] -= actual;
-            consumedTotals[supplyId] =
-              (consumedTotals[supplyId] ?? 0) + actual;
-          }
+      for (const [supplyId, reqAmount] of Object.entries(
+        outcome.consumedSupplies
+      )) {
+        if (reqAmount <= 0) continue;
+        const buf = this.supplyBuffers.get(supplyId);
+        if (!buf) continue;
+        const actual = Math.min(buf[i], reqAmount);
+        if (actual > 0) {
+          buf[i] -= actual;
+          consumedTotals[supplyId] = (consumedTotals[supplyId] ?? 0) + actual;
         }
       }
 
-      if (outcome.consumedResources) {
-        for (const [resId, reqAmount] of Object.entries(
-          outcome.consumedResources
-        )) {
-          if (reqAmount <= 0) continue;
-          const currentAvail = availableResources[resId] ?? 0;
-          const actual = Math.min(currentAvail, reqAmount);
-          if (actual > 0) {
-            availableResources[resId] = currentAvail - actual;
-            consumedResourcesDelta[resId] =
-              (consumedResourcesDelta[resId] ?? 0) + actual;
-          }
+      for (const [resId, reqAmount] of Object.entries(
+        outcome.consumedResources
+      )) {
+        if (reqAmount <= 0) continue;
+        const currentAvail = availableResources[resId] ?? 0;
+        const actual = Math.min(currentAvail, reqAmount);
+        if (actual > 0) {
+          availableResources[resId] = currentAvail - actual;
+          consumedResourcesDelta[resId] =
+            (consumedResourcesDelta[resId] ?? 0) + actual;
         }
       }
 
@@ -874,7 +890,7 @@ export class SimulationCore {
       this.nextGrid[i] = resolvedNextIdx;
 
       if (resolvedNextIdx !== this.currentGrid[i]) {
-        this.emitFlags[i] = 0;
+        this.pendingEmissions[i] = [];
         const nextDef = this.cellTypeByIndex[resolvedNextIdx];
         this.nextCellStates[i] = this.createCellInitialState(nextDef);
         lostCells.push({
@@ -884,20 +900,10 @@ export class SimulationCore {
           state: { ...currentState },
         });
       } else {
-        if (outcome.nextState !== undefined) {
-          this.nextCellStates[i] = outcome.nextState
-            ? { ...outcome.nextState }
-            : null;
-        } else {
-          this.nextCellStates[i] = this.cellStates[i]
-            ? { ...this.cellStates[i] }
-            : null;
-        }
-
-        if (outcome.canEmit) {
-          this.emitFlags[i] = 1;
-        }
-
+        this.nextCellStates[i] = outcome.nextState
+          ? { ...outcome.nextState }
+          : null;
+        this.pendingEmissions[i] = outcome.emissions;
         addDelta(producedResourcesDelta, outcome.producedResources);
       }
 
@@ -913,28 +919,31 @@ export class SimulationCore {
       }
     }
 
-    // Evaluate default (empty) cells only if default type has an onCycle behavior
+    // Evaluate default (empty) cells only if default type has onCycle rules
     const defaultDef = this.cellTypeByIndex[this.defaultCellIndex];
-    if (defaultDef.behavior?.module.onCycle) {
+    if (defaultDef.onCycle && defaultDef.onCycle.length > 0) {
       for (let i = 0; i < total; i++) {
         if (evaluatedFlags[i] === 1) continue;
         const x = i % w;
         const y = (i - x) / w;
         this.fillLocalSupplies(i, supplyEntries, localSupplies);
-        const outcome = this.evaluateCellTick(
-          x,
-          y,
+        const outcome = evaluateCycleRules(
           defaultDef,
-          {},
-          localSupplies,
-          availableResources,
-          initialCaps
+          this.createEvalContext(x, y, {
+            cellType: defaultDef,
+            state: {},
+            supplies: localSupplies,
+            resources: availableResources,
+            resourceCaps: initialCaps,
+          })
         );
         const nextIdx = this.cellIndexById.get(outcome.nextTypeId);
         if (nextIdx !== undefined && nextIdx !== this.defaultCellIndex) {
           this.nextGrid[i] = nextIdx;
           const nextDef = this.cellTypeByIndex[nextIdx];
           this.nextCellStates[i] = this.createCellInitialState(nextDef);
+        } else if (outcome.emissions.length > 0) {
+          this.pendingEmissions[i] = outcome.emissions;
         }
       }
     }
@@ -954,20 +963,18 @@ export class SimulationCore {
       }
     }
 
-    // Invoke modular onTickLost hooks (e.g. House population reclamation)
+    // Execute declarative onLost rules for cells transformed/removed during cycle
     if (lostCells.length > 0) {
-      const world = this.getWorldApi();
+      const world = this.createMutableWorld();
       for (const lost of lostCells) {
-        if (lost.cellType.behavior?.module.onTickLost) {
-          lost.cellType.behavior.module.onTickLost(
-            {
-              x: lost.x,
-              y: lost.y,
+        if (lost.cellType.onLost && lost.cellType.onLost.length > 0) {
+          executeWorldRules(
+            lost.cellType.onLost,
+            this.createEvalContext(lost.x, lost.y, {
               cellType: lost.cellType,
               state: lost.state,
-              world,
-            },
-            lost.cellType.behavior.params
+            }),
+            world
           );
         }
       }
@@ -1004,10 +1011,8 @@ export class SimulationCore {
       const rowOffset = y * w;
       for (let x = 0; x < w; x++) {
         const idx = rowOffset + x;
-        if (this.emitFlags[idx] === 0) continue;
-
-        const cellType = this.cellTypeByIndex[this.currentGrid[idx]];
-        const emissions = cellType.emissions;
+        const emissions = this.pendingEmissions[idx];
+        if (!emissions || emissions.length === 0) continue;
         for (let e = 0; e < emissions.length; e++) {
           this.applyEmission(x, y, emissions[e], producedTotals);
         }
@@ -1034,21 +1039,27 @@ export class SimulationCore {
     x: number,
     y: number,
     button: MouseButton
-  ): CellClickAction {
-    if (!this.inBounds(x, y)) return { kind: 'none' };
+  ): ClickExecutionResult {
+    if (!this.inBounds(x, y)) return { uiAction: null, mutated: false };
     const cellType = this.getCellTypeAt(x, y);
-    const action =
+    const rules =
       button === 'left'
-        ? cellType.onClick.left
+        ? cellType.onClick?.left
         : button === 'right'
-          ? cellType.onClick.right
-          : { kind: 'none' as const };
-
-    if (action.kind === 'setCell') {
-      this.setCell(x, y, action.cellTypeId);
+          ? cellType.onClick?.right
+          : undefined;
+    if (!rules || rules.length === 0) {
+      return { uiAction: null, mutated: false };
     }
-
-    return action;
+    const result = executeWorldRules(
+      rules,
+      this.createEvalContext(x, y),
+      this.createMutableWorld()
+    );
+    if (result.mutated) {
+      this.reconcileResourceCaps();
+    }
+    return result;
   }
 
   public getEmissionPreviewCoords(
@@ -1058,13 +1069,16 @@ export class SimulationCore {
   ): GridCoordinate[] {
     if (!this.inBounds(x, y)) return [];
     const cellType = this.getCellTypeById(cellTypeId);
-    if (!cellType || cellType.emissions.length === 0) return [];
+    if (!cellType) return [];
+    const emissions = extractStaticEmissions(cellType);
+    if (emissions.length === 0) return [];
 
     const seen = new Set<number>();
     const coords: GridCoordinate[] = [];
 
-    for (const emission of cellType.emissions) {
+    for (const emission of emissions) {
       const r = emission.radius;
+      const includeSelf = emission.includeSelf ?? true;
       if (emission.neighborhood === 'self') {
         const key = y * this.width + x;
         if (!seen.has(key)) {
@@ -1075,45 +1089,28 @@ export class SimulationCore {
       }
 
       for (let dy = -r; dy <= r; dy++) {
+        const ty = y + dy;
+        if (ty < 0 || ty >= this.height) continue;
         for (let dx = -r; dx <= r; dx++) {
-          if (!emission.includeSelf && dx === 0 && dy === 0) continue;
+          if (!includeSelf && dx === 0 && dy === 0) continue;
           if (
             emission.neighborhood === 'vonNeumann' &&
             Math.abs(dx) + Math.abs(dy) > r
           ) {
             continue;
           }
-          const resolved = this.resolveCoordinate(x + dx, y + dy);
-          if (!resolved) continue;
-          const key = resolved.y * this.width + resolved.x;
+          const tx = x + dx;
+          if (tx < 0 || tx >= this.width) continue;
+          const key = ty * this.width + tx;
           if (!seen.has(key)) {
             seen.add(key);
-            coords.push(resolved);
+            coords.push({ x: tx, y: ty });
           }
         }
       }
     }
 
     return coords;
-  }
-
-  public isCellActiveAt(x: number, y: number): boolean {
-    if (!this.inBounds(x, y)) return true;
-    const cellType = this.getCellTypeAt(x, y);
-    if (!cellType.behavior?.module.isActive) return true;
-    return cellType.behavior.module.isActive(
-      {
-        x,
-        y,
-        cellType,
-        state: this.getCellStateAt(x, y),
-        supplies: this.getLocalSupplies(x, y),
-        resources: this.getResources(),
-        resourceCaps: this.getResourceCaps(),
-        manifest: this.manifest,
-      },
-      cellType.behavior.params
-    );
   }
 
   private getProjectedResourcesForCell(
@@ -1138,22 +1135,21 @@ export class SimulationCore {
       const y = (i - x) / w;
       this.fillLocalSupplies(i, supplyEntries, localSupplies);
       const cellType = this.cellTypeByIndex[this.currentGrid[i]];
-      const outcome = this.evaluateCellTick(
-        x,
-        y,
+      const outcome = evaluateCycleRules(
         cellType,
-        this.cellStates[i] ?? {},
-        localSupplies,
-        simResources,
-        resourceCaps
+        this.createEvalContext(x, y, {
+          cellType,
+          state: this.cellStates[i] ?? {},
+          supplies: localSupplies,
+          resources: simResources,
+          resourceCaps,
+        })
       );
 
-      if (outcome.consumedResources) {
-        for (const [resId, req] of Object.entries(outcome.consumedResources)) {
-          if (req <= 0) continue;
-          const avail = simResources[resId] ?? 0;
-          simResources[resId] = Math.max(0, avail - Math.min(avail, req));
-        }
+      for (const [resId, req] of Object.entries(outcome.consumedResources)) {
+        if (req <= 0) continue;
+        const avail = simResources[resId] ?? 0;
+        simResources[resId] = Math.max(0, avail - Math.min(avail, req));
       }
     }
 
@@ -1172,63 +1168,24 @@ export class SimulationCore {
       resourceCaps
     );
 
-    const statusBadge = cellType.behavior?.module.getStatusBadge
-      ? cellType.behavior.module.getStatusBadge(
-          {
-            x,
-            y,
-            cellType,
-            state,
-            supplies,
-            resources: this.getResources(),
-            resourceCaps,
-            manifest: this.manifest,
-          },
-          cellType.behavior.params
-        )
-      : null;
-
-    if (cellType.behavior?.module.explainCycle) {
-      const explanation = cellType.behavior.module.explainCycle(
-        {
-          x,
-          y,
-          cellType,
-          state,
-          supplies,
-          resources: availResources,
-          resourceCaps,
-          manifest: this.manifest,
-        },
-        cellType.behavior.params
-      );
-      const nextCellType =
-        this.getCellTypeById(explanation.nextTypeId) ?? cellType;
-      return {
-        x,
-        y,
-        cellType,
-        state,
-        supplies,
-        nextCellType,
-        willChange: nextCellType.id !== cellType.id,
-        transitionLabel: explanation.label,
-        transitionTone: explanation.tone,
-        statusBadge,
-      };
-    }
-
-    const outcome = this.evaluateCellTick(
-      x,
-      y,
+    const badgeCtx = this.createEvalContext(x, y, {
       cellType,
       state,
       supplies,
-      availResources,
-      resourceCaps
-    );
+      resourceCaps,
+    });
+    const statusBadge = resolveCellBadge(cellType, badgeCtx);
+
+    const cycleCtx = this.createEvalContext(x, y, {
+      cellType,
+      state,
+      supplies,
+      resources: availResources,
+      resourceCaps,
+    });
+    const outcome = evaluateCycleRules(cellType, cycleCtx);
     const nextCellType = this.getCellTypeById(outcome.nextTypeId) ?? cellType;
-    const willChange = nextCellType.id !== cellType.id;
+    const explanation = deriveCycleExplanation(cellType, cycleCtx, outcome);
 
     return {
       x,
@@ -1237,11 +1194,9 @@ export class SimulationCore {
       state,
       supplies,
       nextCellType,
-      willChange,
-      transitionLabel: willChange
-        ? t('core.transitionTo', { name: nextCellType.name })
-        : cellType.shortRule || '',
-      transitionTone: willChange ? 'positive' : 'neutral',
+      willChange: nextCellType.id !== cellType.id,
+      transitionLabel: explanation.transitionLabel,
+      transitionTone: explanation.transitionTone,
       statusBadge,
     };
   }
@@ -1281,35 +1236,31 @@ export class SimulationCore {
       const cellType = this.cellTypeByIndex[this.currentGrid[i]];
       this.fillLocalSupplies(i, supplyEntries, localSupplies);
 
-      const state = this.cellStates[i] ?? {};
-      const outcome = this.evaluateCellTick(
-        x,
-        y,
+      const outcome = evaluateCycleRules(
         cellType,
-        state,
-        localSupplies,
-        simResources,
-        resourceCaps
+        this.createEvalContext(x, y, {
+          cellType,
+          state: this.cellStates[i] ?? {},
+          supplies: localSupplies,
+          resources: simResources,
+          resourceCaps,
+        })
       );
 
-      if (outcome.consumedResources) {
-        for (const [resId, req] of Object.entries(outcome.consumedResources)) {
-          if (req <= 0) continue;
-          const avail = simResources[resId] ?? 0;
-          const actual = Math.min(avail, req);
-          if (actual > 0) {
-            simResources[resId] = avail - actual;
-            if (projectedBreakdown[resId]) {
-              projectedBreakdown[resId].consumed += actual;
-            }
+      for (const [resId, req] of Object.entries(outcome.consumedResources)) {
+        if (req <= 0) continue;
+        const avail = simResources[resId] ?? 0;
+        const actual = Math.min(avail, req);
+        if (actual > 0) {
+          simResources[resId] = avail - actual;
+          if (projectedBreakdown[resId]) {
+            projectedBreakdown[resId].consumed += actual;
           }
         }
       }
 
-      if (outcome.nextTypeId === cellType.id && outcome.producedResources) {
-        for (const [resId, amount] of Object.entries(
-          outcome.producedResources
-        )) {
+      if (outcome.nextTypeId === cellType.id) {
+        for (const [resId, amount] of Object.entries(outcome.producedResources)) {
           if (!amount || !projectedBreakdown[resId]) continue;
           if (amount > 0) projectedBreakdown[resId].gained += amount;
           else projectedBreakdown[resId].consumed += Math.abs(amount);

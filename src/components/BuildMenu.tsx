@@ -1,11 +1,11 @@
 import {
   AffordabilityCheck,
   CellTypeId,
-  ResolvedCellType,
-  ResourceId,
+  CellTypeManifest,
   RulesetManifest,
+  StatusBadge,
   StatusTone,
-  SupplyId,
+  extractBuildResourceSummary,
 } from '../engine/sdk';
 import { t } from '../i18n';
 import { CellPopover } from './CellPopover';
@@ -21,11 +21,9 @@ export interface BuildMenuState {
 interface BuildMenuProps {
   menu: BuildMenuState;
   manifest: RulesetManifest;
-  cellTypes: readonly ResolvedCellType[];
-  currentResources: Record<ResourceId, number>;
-  resourceCaps: Record<ResourceId, number | null>;
-  localSupplies: Record<SupplyId, number>;
+  cellTypes: readonly CellTypeManifest[];
   checkAffordability: (cellTypeId: CellTypeId) => AffordabilityCheck;
+  getBuildPreview: (cellTypeId: CellTypeId) => StatusBadge | null;
   containerWidth: number;
   containerHeight: number;
   onSelect: (cellTypeId: CellTypeId) => void;
@@ -44,10 +42,8 @@ export function BuildMenu({
   menu,
   manifest,
   cellTypes,
-  currentResources,
-  resourceCaps,
-  localSupplies,
   checkAffordability,
+  getBuildPreview,
   containerWidth,
   containerHeight,
   onSelect,
@@ -56,30 +52,25 @@ export function BuildMenu({
 }: BuildMenuProps) {
   const optionDefs = menu.options
     .map((id) => cellTypes.find((c) => c.id === id))
-    .filter((c): c is ResolvedCellType => Boolean(c));
+    .filter((c): c is CellTypeManifest => Boolean(c));
 
-  const formatCostSummary = (def: ResolvedCellType): string => {
+  const formatCostSummary = (def: CellTypeManifest): string => {
     const parts: string[] = [];
     if (def.buildCost) {
       for (const [resId, cost] of Object.entries(def.buildCost)) {
         if (cost <= 0) continue;
-        const name =
-          manifest.resources.find((r) => r.id === resId)?.shortName ??
-          manifest.resources.find((r) => r.id === resId)?.name ??
-          resId;
+        const res = manifest.resources.find((r) => r.id === resId);
+        const name = res?.shortName ?? res?.name ?? resId;
         parts.push(`${cost} ${name}`);
       }
     }
-    if (def.onBuildEffect) {
-      for (const [resId, delta] of Object.entries(def.onBuildEffect)) {
-        if (!delta) continue;
-        const name =
-          manifest.resources.find((r) => r.id === resId)?.shortName ??
-          manifest.resources.find((r) => r.id === resId)?.name ??
-          resId;
-        const sign = delta > 0 ? '+' : '−';
-        parts.push(`${sign}${Math.abs(delta)} ${name}`);
-      }
+    const buildDelta = extractBuildResourceSummary(def);
+    for (const [resId, delta] of Object.entries(buildDelta)) {
+      if (!delta) continue;
+      const res = manifest.resources.find((r) => r.id === resId);
+      const name = res?.shortName ?? res?.name ?? resId;
+      const sign = delta > 0 ? '+' : '−';
+      parts.push(`${sign}${Math.abs(delta)} ${name}`);
     }
     return parts.join(' · ');
   };
@@ -103,19 +94,7 @@ export function BuildMenu({
         {optionDefs.map((def) => {
           const afford = checkAffordability(def.id);
           const preview = afford.ok
-            ? (def.behavior?.module.getBuildPreview?.(
-                {
-                  x: menu.cellX,
-                  y: menu.cellY,
-                  cellType: def,
-                  state: {},
-                  supplies: localSupplies,
-                  resources: currentResources,
-                  resourceCaps,
-                  manifest,
-                },
-                def.behavior.params
-              ) ?? null)
+            ? getBuildPreview(def.id)
             : {
                 text: t('build.missing', {
                   list: afford.missing
@@ -135,7 +114,7 @@ export function BuildMenu({
               onMouseLeave={() => onHoverOption(null)}
               onFocus={() => onHoverOption(def.id)}
               onBlur={() => onHoverOption(null)}
-              className={`w-full text-left px-3 py-2 rounded-md transition-colors flex items-start gap-2.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
+              className={`w-full text-left px-3 py-2 rounded-md transition-colors flex items-start gap-2.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
                 afford.ok
                   ? 'hover:bg-[#17202B] focus-visible:bg-[#17202B] cursor-pointer'
                   : 'opacity-55 cursor-not-allowed'

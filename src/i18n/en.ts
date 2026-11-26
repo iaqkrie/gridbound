@@ -11,6 +11,13 @@ export const en = {
   'menu.newGame': 'New Game',
   'menu.saveName': 'Save Name',
   'menu.ruleset': 'Ruleset',
+  'menu.rulesetStudio': 'Ruleset Studio',
+  'menu.newRuleset': 'New',
+  'menu.editRuleset': 'Edit {name}',
+  'menu.cloneRuleset': 'Clone & edit {name}',
+  'menu.importJson': 'Import JSON',
+  'menu.deleteRuleset': 'Remove {name}',
+  'menu.importErrorTitle': 'Invalid ruleset JSON',
   'menu.mapSize': 'Map Size',
   'menu.seed': 'Seed',
   'menu.seedPlaceholder': 'Random',
@@ -21,6 +28,25 @@ export const en = {
   'menu.continue': 'Continue',
   'menu.deleteSave': 'Delete save {name}',
   'menu.defaultSaveName': 'Colony #{n}',
+
+  // Ruleset Studio Editor
+  'editor.save': 'Save',
+  'editor.saved': 'Saved',
+  'editor.testPlay': 'Test Play',
+  'editor.importJson': 'Import',
+  'editor.exportJson': 'Export JSON',
+  'editor.sectionGeneral': 'General',
+  'editor.sectionResources': 'Resources',
+  'editor.sectionSupplies': 'Supplies',
+  'editor.sectionGenerator': 'World Generator',
+  'editor.sectionCells': 'Cells',
+  'editor.unsavedTitle': 'Unsaved Changes',
+  'editor.saveAndExit': 'Save & Exit',
+  'editor.discardAndExit': 'Discard & Exit',
+
+  // Sandbox Playtest
+  'sandbox.backToEditor': 'Back to Editor',
+  'sandbox.newSeed': 'New Seed',
 
   // Exit Modal
   'exit.title': 'Return to Menu',
@@ -48,6 +74,8 @@ export const en = {
   'demolish.title': 'Demolish {name}?',
   'demolish.confirm': 'Demolish',
   'demolish.aria': 'Demolish {name}',
+  'demolish.reclaimWarning': '{count} {key} will be unassigned',
+  'demolish.capOverflowWarning': '{excess} {resource} will be lost',
 
   // Engine Core Fallbacks
   'core.outOfBounds': 'Out of bounds',
@@ -55,41 +83,19 @@ export const en = {
   'core.insufficient': 'Missing: {list}',
   'core.transitionTo': 'Becomes {name}',
 
-  // Builtin Behaviors
-  'behavior.idleTitle': '{name} idle',
-  'behavior.idleMessage': 'No worker for {cycles} cycles',
-  'behavior.workerBadge': 'W {count}/1',
-  'behavior.noSupply': 'No {supply}',
-  'behavior.supplyReady': '{supply} OK · +{amount} {resource}/cycle',
-  'behavior.outputPerCycle': '+{amount} {resource}/cycle',
-  'behavior.noWorker': 'No worker',
-  'behavior.noSupplyCycle': 'No {supply}',
-  'behavior.workerFreed': 'Worker freed',
-  'behavior.starveTitle': 'Starving ({current}/{max})',
-  'behavior.starveMessage': 'No {resource} — collapses next cycle',
-  'behavior.hungerBadge': 'Hunger {current}/{max}',
-  'behavior.stockAvailable': '−{consume} {resource}{income}',
-  'behavior.stockEmpty': 'No {resource}',
-  'behavior.willCollapse': 'Collapses next cycle',
-  'behavior.hungerProgress': 'No {resource} ({current}→{next}/{max})',
-  'behavior.reclaimWarning': '1 worker will be unassigned',
-  'behavior.storageNone': 'Unset',
-  'behavior.storageCapPreview': '+{amount} max cap',
-  'behavior.storageSelect': 'Select resource',
-  'behavior.storageActive': '+{amount} {resource} cap',
-  'behavior.storageOverflowWarning': '{excess} {resource} will be lost',
+  // Declarative Inspection & Previews
+  'inspect.needSupply': 'No {name}',
+  'inspect.needResource': 'No {name}',
+  'inspect.needState': 'Needs {key}',
+  'inspect.needNeighbor': 'Needs {name}',
+  'inspect.inactive': 'Inactive',
+  'inspect.selectResource': 'Select resource',
+  'inspect.capBonusPreview': '+{amount} max cap',
 
-  // Builtin Panels
-  'panel.worker': 'Worker',
-  'panel.workerAssigned': '1 / 1',
-  'panel.workerUnassigned': '0 / 1',
-  'panel.output': 'Output',
-  'panel.idle': 'Idle',
-  'panel.idleCycles': '{count} c.',
-  'panel.assignWorker': 'Assign Worker ({free} free)',
-  'panel.noFreeWorkers': 'No free workers',
-  'panel.removeWorker': 'Remove Worker',
-  'panel.storageCapBonus': 'Cap Bonus',
+  // Declarative Panel Fallbacks
+  'panel.assign': 'Assign',
+  'panel.remove': 'Remove',
+  'panel.noneAvailable': 'None available',
 } as const;
 
 export type TranslationKey = keyof typeof en;

@@ -2,10 +2,12 @@ import { SimulationCore } from '../engine/SimulationCore';
 import {
   CellTypeId,
   GridCoordinate,
-  ResolvedCellType,
+  ResolvedVisualIndicator,
+  ResolvedVisualState,
   SupplyId,
   SupplyManifest,
   SupplyOverlayMode,
+  getIconDef,
 } from '../engine/sdk';
 
 export const BASE_CELL_SIZE = 28;
@@ -57,29 +59,6 @@ function lightenHex(hex: string, amount: number): string {
   return `rgb(${lr}, ${lg}, ${lb})`;
 }
 
-function drawWorkerMarker(
-  ctx: CanvasRenderingContext2D,
-  hasWorker: boolean,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const markerR = Math.max(2, cellSize * 0.09);
-  const mx = innerX + innerSize - markerR - 2;
-  const my = innerY + innerSize - markerR - 2;
-  ctx.beginPath();
-  ctx.arc(mx, my, markerR, 0, Math.PI * 2);
-  if (hasWorker) {
-    ctx.fillStyle = '#10B981';
-    ctx.fill();
-  } else {
-    ctx.strokeStyle = '#8B98A9';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-}
-
 function drawSupplyHeatmap(
   ctx: CanvasRenderingContext2D,
   core: SimulationCore,
@@ -129,369 +108,219 @@ function drawGridHairlines(
   ctx.stroke();
 }
 
-function drawWaterGlyph(
+function drawCellFrame(
   ctx: CanvasRenderingContext2D,
-  color: string,
+  visual: ResolvedVisualState,
   px: number,
   py: number,
   cellSize: number,
   innerX: number,
   innerY: number,
-  innerSize: number
+  innerSize: number,
+  fullTileFill = false
 ): void {
-  ctx.fillStyle = hexToRgba(color, 0.34);
-  ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-  ctx.strokeStyle = hexToRgba(color, 0.72);
-  ctx.lineWidth = Math.max(1, cellSize * 0.045);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
+  const color = visual.color;
+  const active = !visual.dim;
 
-  if (cellSize < 14) return;
-
-  ctx.strokeStyle = hexToRgba('#7DD3FC', 0.9);
-  ctx.lineWidth = Math.max(1, cellSize * 0.055);
-  const margin = innerSize * 0.2;
-  const waveW = innerSize - margin * 2;
-  const amp = Math.max(1.2, innerSize * 0.07);
-  const rows = [innerY + innerSize * 0.38, innerY + innerSize * 0.66];
-  ctx.beginPath();
-  for (const ry of rows) {
-    const x0 = innerX + margin;
-    ctx.moveTo(x0, ry);
-    ctx.quadraticCurveTo(x0 + waveW * 0.25, ry - amp, x0 + waveW * 0.5, ry);
-    ctx.quadraticCurveTo(x0 + waveW * 0.75, ry + amp, x0 + waveW, ry);
+  if (fullTileFill) {
+    ctx.fillStyle = hexToRgba(color, active ? 0.3 : 0.12);
+    ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
+  } else {
+    ctx.fillStyle = hexToRgba(color, active ? 0.24 : 0.1);
+    ctx.fillRect(innerX, innerY, innerSize, innerSize);
   }
-  ctx.stroke();
+
+  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
+  ctx.lineWidth = Math.max(1, cellSize * (fullTileFill ? 0.042 : 0.058));
+  if (visual.border === 'dashed') {
+    ctx.setLineDash([3, 2]);
+  }
+  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
+  ctx.setLineDash([]);
 }
 
-function drawForestGlyph(
+function drawGlyph(
   ctx: CanvasRenderingContext2D,
+  glyph: string,
   color: string,
+  active: boolean,
   px: number,
   py: number,
   cellSize: number,
-  innerX: number,
-  innerY: number,
   innerSize: number
 ): void {
-  ctx.fillStyle = hexToRgba('#15803D', 0.28);
-  ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-  ctx.strokeStyle = hexToRgba(color, 0.45);
-  ctx.lineWidth = Math.max(1, cellSize * 0.04);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-
   if (cellSize < 12) return;
-
-  const cx = px + cellSize / 2;
-  const topY = innerY + innerSize * 0.16;
-  const midY = innerY + innerSize * 0.48;
-  const botY = innerY + innerSize * 0.74;
-  const trunkY = innerY + innerSize * 0.88;
-
-  ctx.strokeStyle = hexToRgba('#4ADE80', 0.92);
-  ctx.lineWidth = Math.max(1.1, cellSize * 0.055);
-  ctx.beginPath();
-  ctx.moveTo(cx - innerSize * 0.22, midY);
-  ctx.lineTo(cx, topY);
-  ctx.lineTo(cx + innerSize * 0.22, midY);
-  ctx.moveTo(cx - innerSize * 0.3, botY);
-  ctx.lineTo(cx, innerY + innerSize * 0.36);
-  ctx.lineTo(cx + innerSize * 0.3, botY);
-  ctx.moveTo(cx, botY);
-  ctx.lineTo(cx, trunkY);
-  ctx.stroke();
-}
-
-function drawMountainGlyph(
-  ctx: CanvasRenderingContext2D,
-  color: string,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  ctx.fillStyle = hexToRgba(color, 0.28);
-  ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-  ctx.strokeStyle = hexToRgba('#94A3B8', 0.45);
-  ctx.lineWidth = Math.max(1, cellSize * 0.04);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-
-  if (cellSize < 12) return;
-
-  const baseY = innerY + innerSize * 0.78;
-  ctx.strokeStyle = '#CBD5E1';
-  ctx.lineWidth = Math.max(1.1, cellSize * 0.055);
-  ctx.beginPath();
-  ctx.moveTo(innerX + innerSize * 0.12, baseY);
-  ctx.lineTo(innerX + innerSize * 0.42, innerY + innerSize * 0.22);
-  ctx.lineTo(innerX + innerSize * 0.7, baseY);
-  ctx.moveTo(innerX + innerSize * 0.52, innerY + innerSize * 0.52);
-  ctx.lineTo(innerX + innerSize * 0.68, innerY + innerSize * 0.34);
-  ctx.lineTo(innerX + innerSize * 0.88, baseY);
-  ctx.stroke();
-}
-
-function drawFarmGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  color: string,
-  x: number,
-  y: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const state = core.getCellStateAt(x, y);
-  const hasWorker = Number(state.worker ?? 0) >= 1;
-  const active = core.isCellActiveAt(x, y);
-
-  ctx.fillStyle = hexToRgba(color, active ? 0.24 : 0.1);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (!active) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (cellSize < 14) return;
-
-  ctx.strokeStyle = hexToRgba(color, active ? 0.9 : 0.42);
-  ctx.lineWidth = Math.max(1, cellSize * 0.055);
-  const lines = 3;
-  const margin = innerSize * 0.22;
-  const usable = innerSize - margin * 2;
-  ctx.beginPath();
-  for (let i = 0; i < lines; i++) {
-    const ly = innerY + margin + (usable * i) / Math.max(1, lines - 1);
-    ctx.moveTo(innerX + margin, ly);
-    ctx.lineTo(innerX + innerSize - margin, ly);
-  }
-  ctx.stroke();
-
-  drawWorkerMarker(ctx, hasWorker, cellSize, innerX, innerY, innerSize);
-}
-
-function drawSawmillGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  color: string,
-  x: number,
-  y: number,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const state = core.getCellStateAt(x, y);
-  const hasWorker = Number(state.worker ?? 0) >= 1;
-  const active = core.isCellActiveAt(x, y);
-
-  ctx.fillStyle = hexToRgba('#15803D', 0.16);
-  ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-
-  ctx.fillStyle = hexToRgba(color, active ? 0.26 : 0.1);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (!active) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (cellSize < 14) return;
-
-  const cx = innerX + innerSize * 0.46;
-  const cy = innerY + innerSize * 0.46;
-  const r = innerSize * 0.22;
-  ctx.strokeStyle = hexToRgba('#FBBF24', active ? 0.92 : 0.45);
-  ctx.lineWidth = Math.max(1.1, cellSize * 0.055);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.moveTo(cx - r * 1.35, cy);
-  ctx.lineTo(cx + r * 1.35, cy);
-  ctx.moveTo(cx, cy - r * 1.35);
-  ctx.lineTo(cx, cy + r * 1.35);
-  ctx.stroke();
-
-  drawWorkerMarker(ctx, hasWorker, cellSize, innerX, innerY, innerSize);
-}
-
-function drawQuarryGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  color: string,
-  x: number,
-  y: number,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const state = core.getCellStateAt(x, y);
-  const hasWorker = Number(state.worker ?? 0) >= 1;
-  const active = core.isCellActiveAt(x, y);
-
-  ctx.fillStyle = hexToRgba('#475569', 0.22);
-  ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-
-  ctx.fillStyle = hexToRgba(color, active ? 0.26 : 0.1);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  ctx.strokeStyle = active ? '#CBD5E1' : hexToRgba('#94A3B8', 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (!active) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (cellSize < 14) return;
-
-  const m = innerSize * 0.22;
-  ctx.strokeStyle = hexToRgba('#E2E8F0', active ? 0.92 : 0.45);
-  ctx.lineWidth = Math.max(1.1, cellSize * 0.055);
-  ctx.beginPath();
-  ctx.moveTo(innerX + m, innerY + innerSize * 0.34);
-  ctx.lineTo(innerX + innerSize * 0.5, innerY + innerSize * 0.34);
-  ctx.lineTo(innerX + innerSize * 0.5, innerY + innerSize * 0.54);
-  ctx.lineTo(innerX + innerSize - m, innerY + innerSize * 0.54);
-  ctx.moveTo(innerX + m, innerY + innerSize * 0.68);
-  ctx.lineTo(innerX + innerSize * 0.62, innerY + innerSize * 0.68);
-  ctx.stroke();
-
-  drawWorkerMarker(ctx, hasWorker, cellSize, innerX, innerY, innerSize);
-}
-
-function drawWarehouseGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  color: string,
-  x: number,
-  y: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const state = core.getCellStateAt(x, y);
-  const resId = String(state.storageResource ?? '');
-  const resDef = resId
-    ? core.manifest.resources.find((r) => r.id === resId)
-    : undefined;
-  const active = Boolean(resDef);
-  const accent = resDef?.color ?? color;
-
-  ctx.fillStyle = hexToRgba(color, active ? 0.24 : 0.12);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (!active) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (cellSize < 14) return;
-
-  const m = innerSize * 0.22;
-  const boxSize = innerSize - m * 2;
-  ctx.strokeStyle = hexToRgba('#E6EDF3', active ? 0.85 : 0.45);
-  ctx.lineWidth = Math.max(1, cellSize * 0.05);
-  ctx.strokeRect(innerX + m, innerY + m, boxSize, boxSize);
-
-  if (active) {
-    const barH = Math.max(2.5, boxSize * 0.36);
-    ctx.fillStyle = accent;
-    ctx.fillRect(
-      innerX + m + 1.5,
-      innerY + m + boxSize - barH - 1.5,
-      Math.max(1, boxSize - 3),
-      barH
-    );
-  }
-}
-
-function drawHouseGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  color: string,
-  x: number,
-  y: number,
-  px: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const state = core.getCellStateAt(x, y);
-  const hunger = Number(state.hunger ?? 0);
-  const critical = hunger >= 3;
-  const hungry = hunger > 0 && hunger < 3;
-  const strokeColor = critical ? '#F43F5E' : hungry ? '#F59E0B' : color;
-
-  ctx.fillStyle = hexToRgba(strokeColor, critical ? 0.22 : 0.2);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-
-  ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (critical) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (cellSize < 14) return;
-
-  const cx = px + cellSize / 2;
-  const topY = innerY + innerSize * 0.22;
-  const midY = innerY + innerSize * 0.52;
-  const botY = innerY + innerSize * 0.78;
-  const halfW = innerSize * 0.28;
-
-  ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = Math.max(1.2, cellSize * 0.065);
-  ctx.beginPath();
-  ctx.moveTo(cx - halfW, midY);
-  ctx.lineTo(cx, topY);
-  ctx.lineTo(cx + halfW, midY);
-  ctx.lineTo(cx + halfW * 0.75, midY);
-  ctx.lineTo(cx + halfW * 0.75, botY);
-  ctx.lineTo(cx - halfW * 0.75, botY);
-  ctx.lineTo(cx - halfW * 0.75, midY);
-  ctx.closePath();
-  ctx.stroke();
-}
-
-function drawCustomSvgGlyph(
-  ctx: CanvasRenderingContext2D,
-  core: SimulationCore,
-  cellType: ResolvedCellType,
-  x: number,
-  y: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const active = core.isCellActiveAt(x, y);
-  const color = cellType.visual.color;
-
-  ctx.fillStyle = hexToRgba(color, active ? 0.24 : 0.1);
-  ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * 0.06);
-  if (!active) ctx.setLineDash([3, 2]);
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-
-  if (!cellType.visual.svgPath || cellSize < 14) return;
-  const path = new Path2D(cellType.visual.svgPath);
-  const scale = (innerSize * 0.72) / 24;
+  const text = glyph.trim().slice(0, 2);
+  if (!text) return;
+  const fontSize = Math.max(
+    9,
+    Math.round(innerSize * (text.length > 1 ? 0.44 : 0.56))
+  );
   ctx.save();
-  ctx.translate(innerX + innerSize * 0.14, innerY + innerSize * 0.14);
-  ctx.scale(scale, scale);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.stroke(path);
+  ctx.font = `700 ${fontSize}px "JetBrains Mono", "Manrope", sans-serif`;
+  ctx.fillStyle = active ? lightenHex(color, 0.35) : hexToRgba(color, 0.5);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, px + cellSize / 2, py + cellSize / 2 + 0.5);
   ctx.restore();
+}
+
+function drawSvgPath24(
+  ctx: CanvasRenderingContext2D,
+  pathData: string,
+  fillPathData: string | undefined,
+  strokeColor: string,
+  fillColor: string | undefined,
+  innerX: number,
+  innerY: number,
+  innerSize: number
+): void {
+  const scale = (innerSize * 0.78) / 24;
+  ctx.save();
+  ctx.translate(innerX + innerSize * 0.11, innerY + innerSize * 0.11);
+  ctx.scale(scale, scale);
+  if (fillPathData && fillColor) {
+    ctx.fillStyle = fillColor;
+    ctx.fill(new Path2D(fillPathData));
+  }
+  if (pathData) {
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1.85;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke(new Path2D(pathData));
+  }
+  ctx.restore();
+}
+
+function drawIcon(
+  ctx: CanvasRenderingContext2D,
+  visual: ResolvedVisualState,
+  px: number,
+  py: number,
+  cellSize: number,
+  innerX: number,
+  innerY: number,
+  innerSize: number
+): void {
+  const active = !visual.dim;
+  const color = visual.color;
+  const iconDef = getIconDef(visual.icon);
+  const fullTileFill = visual.fullTile ?? Boolean(iconDef?.defaultFullTile);
+
+  drawCellFrame(
+    ctx,
+    visual,
+    px,
+    py,
+    cellSize,
+    innerX,
+    innerY,
+    innerSize,
+    fullTileFill
+  );
+
+  // 1. Explicit text glyph takes priority when set
+  if (visual.glyph && visual.glyph.trim().length > 0) {
+    drawGlyph(ctx, visual.glyph, color, active, px, py, cellSize, innerSize);
+    return;
+  }
+
+  // 2. Custom SVG path override
+  if (visual.svgPath) {
+    if (cellSize < 13) return;
+    drawSvgPath24(
+      ctx,
+      visual.svgPath,
+      undefined,
+      active ? lightenHex(color, 0.25) : hexToRgba(color, 0.5),
+      undefined,
+      innerX,
+      innerY,
+      innerSize
+    );
+    return;
+  }
+
+  // 3. Built-in 34-icon vector registry
+  if (iconDef && iconDef.id !== 'empty') {
+    if (cellSize < 12) return;
+    const strokeColor = active
+      ? lightenHex(color, 0.35)
+      : hexToRgba(color, 0.48);
+    const fillColor = iconDef.fillPath
+      ? hexToRgba(color, active ? 0.5 : 0.22)
+      : undefined;
+    drawSvgPath24(
+      ctx,
+      iconDef.path,
+      iconDef.fillPath,
+      strokeColor,
+      fillColor,
+      innerX,
+      innerY,
+      innerSize
+    );
+    return;
+  }
+
+  // 4. Fallback solid square when no icon/glyph set
+  if (!iconDef && cellSize >= 18) {
+    ctx.fillStyle = active
+      ? hexToRgba(color, 0.55)
+      : hexToRgba(color, 0.22);
+    const m = innerSize * 0.26;
+    ctx.fillRect(innerX + m, innerY + m, innerSize - m * 2, innerSize - m * 2);
+  }
+}
+
+function drawIndicators(
+  ctx: CanvasRenderingContext2D,
+  indicators: readonly ResolvedVisualIndicator[],
+  cellSize: number,
+  innerX: number,
+  innerY: number,
+  innerSize: number
+): void {
+  if (cellSize < 14 || indicators.length === 0) return;
+
+  for (const ind of indicators) {
+    if (ind.kind === 'dot') {
+      const markerR = Math.max(2, cellSize * 0.085);
+      const inset = markerR + Math.max(2, cellSize * 0.05);
+      let mx = innerX + innerSize - inset;
+      let my = innerY + innerSize - inset;
+      if (ind.position === 'topLeft') {
+        mx = innerX + inset;
+        my = innerY + inset;
+      } else if (ind.position === 'bottomLeft') {
+        mx = innerX + inset;
+        my = innerY + innerSize - inset;
+      }
+
+      ctx.beginPath();
+      ctx.arc(mx, my, markerR, 0, Math.PI * 2);
+      if (ind.filled) {
+        ctx.fillStyle = ind.color;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = ind.color;
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+      }
+    } else if (ind.kind === 'bar') {
+      const m = innerSize * 0.22;
+      const boxSize = innerSize - m * 2;
+      const barH = Math.max(2.5, boxSize * 0.36);
+      ctx.fillStyle = ind.color;
+      ctx.fillRect(
+        innerX + m + 1.5,
+        innerY + m + boxSize - barH - 1.5,
+        Math.max(1, boxSize - 3),
+        barH
+      );
+    }
+  }
 }
 
 function drawCells(
@@ -512,73 +341,30 @@ function drawCells(
     const py = offsetY + y * cellSize;
     for (let x = bounds.startX; x <= bounds.endX; x++) {
       const cellType = cellTypes[gridBuf[row + x]];
-      if (cellType.id === defaultId) continue;
+      if (
+        cellType.id === defaultId &&
+        cellType.visual.icon === 'empty' &&
+        !cellType.visual.glyph &&
+        !cellType.visual.svgPath &&
+        !cellType.visual.fullTile &&
+        (!cellType.visual.rules || cellType.visual.rules.length === 0)
+      ) {
+        continue;
+      }
 
       const px = offsetX + x * cellSize;
       const innerX = px + pad;
       const innerY = py + pad;
       const innerSize = Math.max(2, cellSize - pad * 2);
-      const color = cellType.visual.color;
+      const visual = core.resolveVisualAt(x, y);
 
-      if (cellType.visual.substrateColor) {
-        ctx.fillStyle = hexToRgba(cellType.visual.substrateColor, 0.2);
+      if (visual.substrateColor) {
+        ctx.fillStyle = hexToRgba(visual.substrateColor, 0.2);
         ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
       }
 
-      if (cellType.visual.svgPath) {
-        drawCustomSvgGlyph(
-          ctx,
-          core,
-          cellType,
-          x,
-          y,
-          cellSize,
-          innerX,
-          innerY,
-          innerSize
-        );
-        continue;
-      }
-
-      switch (cellType.visual.glyph) {
-        case 'water':
-          drawWaterGlyph(ctx, color, px, py, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'forest':
-          drawForestGlyph(ctx, color, px, py, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'mountain':
-          drawMountainGlyph(ctx, color, px, py, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'farm':
-          drawFarmGlyph(ctx, core, color, x, y, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'sawmill':
-          drawSawmillGlyph(ctx, core, color, x, y, px, py, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'quarry':
-          drawQuarryGlyph(ctx, core, color, x, y, px, py, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'warehouse':
-          drawWarehouseGlyph(ctx, core, color, x, y, cellSize, innerX, innerY, innerSize);
-          break;
-        case 'house':
-          drawHouseGlyph(ctx, core, color, x, y, px, cellSize, innerX, innerY, innerSize);
-          break;
-        default:
-          ctx.fillStyle = color;
-          ctx.fillRect(innerX, innerY, innerSize, innerSize);
-          if (cellSize >= 18) {
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
-            ctx.fillRect(
-              innerX,
-              innerY,
-              innerSize,
-              Math.max(1.5, innerSize * 0.12)
-            );
-          }
-          break;
-      }
+      drawIcon(ctx, visual, px, py, cellSize, innerX, innerY, innerSize);
+      drawIndicators(ctx, visual.indicators, cellSize, innerX, innerY, innerSize);
     }
   }
 }
@@ -669,22 +455,11 @@ function drawBuildPreview(
   );
   if (affected.length === 0) return;
 
-  const localSupplies = core.getLocalSupplies(selectedCell.x, selectedCell.y);
-  const previewBadge = previewType.behavior?.module.getBuildPreview
-    ? previewType.behavior.module.getBuildPreview(
-        {
-          x: selectedCell.x,
-          y: selectedCell.y,
-          cellType: previewType,
-          state: {},
-          supplies: localSupplies,
-          resources: core.getResources(),
-          resourceCaps: core.getResourceCaps(),
-          manifest: core.manifest,
-        },
-        previewType.behavior.params
-      )
-    : null;
+  const previewBadge = core.getBuildPreview(
+    selectedCell.x,
+    selectedCell.y,
+    previewCellTypeId
+  );
   const previewActive = previewBadge?.tone !== 'danger';
   const previewColor = previewType.visual.color;
 
@@ -792,11 +567,8 @@ export function renderGridScene({
   }
 
   ctx.save();
-  ctx.strokeStyle = core.boundaryMode === 'toroidal' ? '#2D3C4E' : '#3B4D63';
+  ctx.strokeStyle = '#3B4D63';
   ctx.lineWidth = 1.5;
-  if (core.boundaryMode === 'toroidal') {
-    ctx.setLineDash([6, 4]);
-  }
   ctx.strokeRect(
     Math.round(offsetX) + 0.5,
     Math.round(offsetY) + 0.5,

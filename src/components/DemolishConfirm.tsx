@@ -1,10 +1,5 @@
 import { Trash2 } from 'lucide-react';
-import {
-  DemolishInfo,
-  ResolvedCellType,
-  ResourceManifest,
-  StatusTone,
-} from '../engine/sdk';
+import { CellTypeManifest, DemolishInfo, StatusTone } from '../engine/sdk';
 import { t } from '../i18n';
 import { CellPopover } from './CellPopover';
 
@@ -13,12 +8,11 @@ export interface DemolishMenuState {
   cellY: number;
   screenX: number;
   screenY: number;
-  cellType: ResolvedCellType;
+  cellType: CellTypeManifest;
 }
 
 interface DemolishConfirmProps {
   menu: DemolishMenuState;
-  resources: readonly ResourceManifest[];
   demolishInfo: DemolishInfo;
   containerWidth: number;
   containerHeight: number;
@@ -35,18 +29,13 @@ const TONE_CLASS: Record<StatusTone, string> = {
 
 export function DemolishConfirm({
   menu,
-  resources,
   demolishInfo,
   containerWidth,
   containerHeight,
   onConfirm,
   onClose,
 }: DemolishConfirmProps) {
-  const refundEntries = Object.entries(
-    menu.cellType.onDemolishEffect ?? {}
-  ).filter(([, val]) => val !== 0);
-  const extraLines = demolishInfo.lines ?? [];
-  const warnings = demolishInfo.warnings ?? [];
+  const { lines, warnings } = demolishInfo;
 
   return (
     <CellPopover
@@ -65,33 +54,9 @@ export function DemolishConfirm({
       onClose={onClose}
     >
       <div className="p-3.5 space-y-3">
-        {(refundEntries.length > 0 || extraLines.length > 0) && (
+        {lines.length > 0 && (
           <div className="space-y-1">
-            {refundEntries.map(([resId, delta]) => {
-              const resDef = resources.find((r) => r.id === resId);
-              const sign = delta > 0 ? '+' : '−';
-              const absVal = Math.abs(delta);
-              return (
-                <div
-                  key={resId}
-                  className="flex items-center justify-between text-xs"
-                >
-                  <span className="text-[#8B98A9]">
-                    {resDef?.name ?? resId}
-                  </span>
-                  <span
-                    className={`font-mono tabular-nums font-semibold ${
-                      delta > 0 ? 'text-[#10B981]' : 'text-[#F43F5E]'
-                    }`}
-                  >
-                    {sign}
-                    {absVal}
-                  </span>
-                </div>
-              );
-            })}
-
-            {extraLines.map((line, idx) => (
+            {lines.map((line, idx) => (
               <div
                 key={`${line.label}-${idx}`}
                 className="flex items-center justify-between text-xs"

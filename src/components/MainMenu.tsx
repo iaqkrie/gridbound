@@ -1,16 +1,28 @@
-import { useState } from 'react';
-import { ArrowRight, Dices, Play, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import {
+  ArrowRight,
+  Copy,
+  Dices,
+  Pencil,
+  Play,
+  Plus,
+  Trash2,
+  Upload,
+  Wrench,
+  X,
+} from 'lucide-react';
 import { SaveSlot } from '../engine/saveStore';
 import {
-  CompiledRuleset,
+  RulesetEntry,
   SetupParamManifest,
   WorldSetupValues,
   generateRandomSeed,
 } from '../engine/sdk';
 import { t } from '../i18n';
+import { RulesetImportResult } from '../rulesets';
 
 interface MainMenuProps {
-  rulesets: CompiledRuleset[];
+  rulesets: RulesetEntry[];
   saves: SaveSlot[];
   defaultSaveName: string;
   onStartNewGame: (
@@ -20,6 +32,11 @@ interface MainMenuProps {
   ) => void;
   onLoadSave: (saveId: string) => void;
   onDeleteSave: (saveId: string) => void;
+  onImportRuleset: (rawJson: string) => RulesetImportResult;
+  onDeleteRuleset: (rulesetId: string) => void;
+  onCreateRuleset: () => void;
+  onEditRuleset: (rulesetId: string) => void;
+  onCloneRuleset: (rulesetId: string) => void;
 }
 
 function buildDefaultParams(
@@ -32,15 +49,15 @@ function buildDefaultParams(
   return result;
 }
 
-function findDefaultMapSizeId(rs?: CompiledRuleset): string {
-  if (!rs) return '';
-  const mapSizes = rs.manifest.setupOptions?.mapSizes;
+function findDefaultMapSizeId(entry?: RulesetEntry): string {
+  if (!entry) return '';
+  const mapSizes = entry.manifest.setupOptions?.mapSizes;
   if (!mapSizes || mapSizes.length === 0) return '';
   const matched =
     mapSizes.find(
       (p) =>
-        p.width === rs.manifest.defaultGridSize.width &&
-        p.height === rs.manifest.defaultGridSize.height
+        p.width === entry.manifest.defaultGridSize.width &&
+        p.height === entry.manifest.defaultGridSize.height
     ) ?? mapSizes[0];
   return matched?.id ?? '';
 }
@@ -52,11 +69,18 @@ export function MainMenu({
   onStartNewGame,
   onLoadSave,
   onDeleteSave,
+  onImportRuleset,
+  onDeleteRuleset,
+  onCreateRuleset,
+  onEditRuleset,
+  onCloneRuleset,
 }: MainMenuProps) {
   const [selectedRulesetId, setSelectedRulesetId] = useState<string>(
     rulesets[0]?.manifest.id ?? ''
   );
   const [saveName, setSaveName] = useState<string>(defaultSaveName);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedRuleset =
     rulesets.find((r) => r.manifest.id === selectedRulesetId) ?? rulesets[0];
@@ -75,10 +99,43 @@ export function MainMenu({
   const setupParams = selectedRuleset?.manifest.setupOptions?.params ?? [];
   const allowSeed = Boolean(selectedRuleset?.manifest.setupOptions?.allowSeed);
 
-  const handleSelectRuleset = (rs: CompiledRuleset) => {
-    setSelectedRulesetId(rs.manifest.id);
-    setSelectedMapSizeId(findDefaultMapSizeId(rs));
-    setParamValues(buildDefaultParams(rs.manifest.setupOptions?.params));
+  const handleSelectRuleset = (entry: RulesetEntry) => {
+    setImportErrors([]);
+    setSelectedRulesetId(entry.manifest.id);
+    setSelectedMapSizeId(findDefaultMapSizeId(entry));
+    setParamValues(buildDefaultParams(entry.manifest.setupOptions?.params));
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const rawJson = await file.text();
+      const result = onImportRuleset(rawJson);
+      if (result.ok && result.entry) {
+        handleSelectRuleset(result.entry);
+      } else {
+        setImportErrors(
+          result.errors && result.errors.length > 0
+            ? result.errors
+            : [t('menu.importErrorTitle')]
+        );
+      }
+    } catch {
+      setImportErrors([t('menu.importErrorTitle')]);
+    }
+  };
+
+  const handleDeleteCustomRuleset = (rulesetId: string) => {
+    onDeleteRuleset(rulesetId);
+    if (selectedRulesetId === rulesetId) {
+      const fallback = rulesets.find((r) => r.manifest.id !== rulesetId);
+      if (fallback) {
+        handleSelectRuleset(fallback);
+      }
+    }
   };
 
   const handleParamChange = (
@@ -121,6 +178,15 @@ export function MainMenu({
             v0.1.0-alpha
           </span>
         </div>
+
+        <button
+          type="button"
+          onClick={onCreateRuleset}
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-[#E6EDF3] bg-[#17202B] hover:bg-[#1F2A38] border border-[#2D3C4E] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+        >
+          <Wrench className="w-3.5 h-3.5 text-[#10B981]" aria-hidden="true" />
+          <span>{t('menu.rulesetStudio')}</span>
+        </button>
       </header>
 
       {/* Main 2-column Tactical Workspace */}
@@ -152,38 +218,153 @@ export function MainMenu({
               </div>
 
               <div>
-                <div className="text-xs font-medium text-[#8B98A9] mb-2">
-                  {t('menu.ruleset')}
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <span className="text-xs font-medium text-[#8B98A9]">
+                    {t('menu.ruleset')}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={onCreateRuleset}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                    >
+                      <Plus className="w-3 h-3" aria-hidden="true" />
+                      <span>{t('menu.newRuleset')}</span>
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleFileChange}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                    >
+                      <Upload className="w-3 h-3" aria-hidden="true" />
+                      <span>{t('menu.importJson')}</span>
+                    </button>
+                  </div>
                 </div>
+
                 <div className="space-y-2">
-                  {rulesets.map((rs) => {
-                    const manifest = rs.manifest;
+                  {rulesets.map((entry) => {
+                    const manifest = entry.manifest;
                     const active = manifest.id === selectedRuleset?.manifest.id;
                     return (
-                      <button
+                      <div
                         key={manifest.id}
-                        type="button"
-                        onClick={() => handleSelectRuleset(rs)}
-                        className={`w-full text-left px-4 py-3 rounded-md border transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#10B981] ${
-                          active
-                            ? 'bg-[#17202B] border-[#10B981]'
-                            : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
-                        }`}
+                        className="flex items-stretch gap-1.5"
                       >
-                        <div className="flex items-baseline justify-between gap-3">
-                          <span className="text-sm font-semibold text-[#E6EDF3]">
-                            {manifest.name}
-                          </span>
-                          <span className="font-mono tabular-nums text-xs text-[#8B98A9] shrink-0">
-                            {active && activePreset
-                              ? `${activePreset.width}×${activePreset.height}`
-                              : `${manifest.defaultGridSize.width}×${manifest.defaultGridSize.height}`}
-                          </span>
-                        </div>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectRuleset(entry)}
+                          className={`flex-1 min-w-0 text-left px-4 py-3 rounded-md border transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
+                            active
+                              ? 'bg-[#17202B] border-[#10B981]'
+                              : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
+                          }`}
+                        >
+                          <div className="flex items-baseline justify-between gap-3">
+                            <span className="text-sm font-semibold text-[#E6EDF3] truncate">
+                              {manifest.name}
+                            </span>
+                            <span className="font-mono tabular-nums text-xs text-[#8B98A9] shrink-0">
+                              {active && activePreset
+                                ? `${activePreset.width}×${activePreset.height}`
+                                : `${manifest.defaultGridSize.width}×${manifest.defaultGridSize.height}`}
+                            </span>
+                          </div>
+                        </button>
+
+                        {entry.isCustom && (
+                          <button
+                            type="button"
+                            onClick={() => onEditRuleset(manifest.id)}
+                            aria-label={t('menu.editRuleset', {
+                              name: manifest.name,
+                            })}
+                            title={t('menu.editRuleset', {
+                              name: manifest.name,
+                            })}
+                            className="px-2.5 text-[#8B98A9] hover:text-[#10B981] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                          >
+                            <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => onCloneRuleset(manifest.id)}
+                          aria-label={t('menu.cloneRuleset', {
+                            name: manifest.name,
+                          })}
+                          title={t('menu.cloneRuleset', {
+                            name: manifest.name,
+                          })}
+                          className="px-2.5 text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                        >
+                          <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                        </button>
+
+                        {entry.isCustom && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleDeleteCustomRuleset(manifest.id)
+                            }
+                            aria-label={t('menu.deleteRuleset', {
+                              name: manifest.name,
+                            })}
+                            title={t('menu.deleteRuleset', {
+                              name: manifest.name,
+                            })}
+                            className="px-2.5 text-[#8B98A9] hover:text-[#F43F5E] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
+
+                {importErrors.length > 0 && (
+                  <div
+                    role="alert"
+                    className="mt-2.5 bg-[#F43F5E]/10 border border-[#F43F5E]/30 rounded-md p-3 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-[#F43F5E]">
+                        {t('menu.importErrorTitle')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setImportErrors([])}
+                        aria-label={t('common.close')}
+                        className="p-0.5 text-[#8B98A9] hover:text-[#E6EDF3] cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" aria-hidden="true" />
+                      </button>
+                    </div>
+                    <ul className="space-y-0.5 font-mono text-[11px] text-[#E6EDF3]/90">
+                      {importErrors.slice(0, 5).map((err, idx) => (
+                        <li key={idx} className="break-words">
+                          {err}
+                        </li>
+                      ))}
+                      {importErrors.length > 5 && (
+                        <li className="text-[#8B98A9]">
+                          {t('hud.moreNotifications', {
+                            count: importErrors.length - 5,
+                          })}
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
               </div>
 
               {mapSizes.length > 0 && (
@@ -200,7 +381,7 @@ export function MainMenu({
                           type="button"
                           onClick={() => setSelectedMapSizeId(preset.id)}
                           aria-pressed={active}
-                          className={`px-3 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#10B981] ${
+                          className={`px-3 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
                             active
                               ? 'bg-[#17202B] border-[#10B981]'
                               : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
@@ -249,7 +430,7 @@ export function MainMenu({
                                     handleParamChange(param.id, opt.value)
                                   }
                                   aria-pressed={active}
-                                  className={`px-3 py-2 rounded-md border text-xs font-medium text-center transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#10B981] ${
+                                  className={`px-3 py-2 rounded-md border text-xs font-medium text-center transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
                                     active
                                       ? 'bg-[#17202B] border-[#10B981] text-[#E6EDF3]'
                                       : 'bg-[#0B0F14] border-[#1F2A38] text-[#8B98A9] hover:text-[#E6EDF3] hover:border-[#2D3C4E]'
@@ -351,7 +532,7 @@ export function MainMenu({
               <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded-md transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#111720] focus-visible:ring-[#10B981]"
+                  className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#111720] focus-visible:ring-[#10B981]"
                 >
                   <Play className="w-4 h-4 fill-current" aria-hidden="true" />
                   <span>{t('menu.startGame')}</span>

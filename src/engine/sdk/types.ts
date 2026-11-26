@@ -1,5 +1,5 @@
-import type { ComponentType } from 'react';
 import type { SoundKind } from '../../utils/sound';
+import type { CellIcon } from './icons';
 
 // ============================================================================
 // Primitive Identifiers & Shared Types
@@ -9,7 +9,6 @@ export type SupplyId = string;
 export type CellTypeId = string;
 export type ResourceId = string;
 
-export type BoundaryMode = 'toroidal' | 'bounded';
 export type NeighborhoodType = 'moore' | 'vonNeumann' | 'self';
 export type MouseButton = 'left' | 'right' | 'middle';
 export type SupplyOverlayMode = 'off' | 'heatmap' | 'numbers';
@@ -18,6 +17,8 @@ export type ResourceDelta = Record<ResourceId, number>;
 export type CellStateValue = number | string | boolean;
 export type CellStateData = Record<string, CellStateValue>;
 export type StatusTone = 'neutral' | 'positive' | 'warning' | 'danger';
+export type NotificationSeverity = 'warning' | 'danger';
+export type CompareOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte';
 
 export interface StatusBadge {
   text: string;
@@ -28,17 +29,6 @@ export interface GridCoordinate {
   x: number;
   y: number;
 }
-
-/**
- * Reference to a TS/TSX module resolved in package modules first, then SDK builtins.
- * Supports either a shorthand string `"builtin:workerPanel"` or `{ ref, params }`.
- */
-export type ModuleRef<TParams = Record<string, unknown>> =
-  | string
-  | {
-      ref: string;
-      params?: TParams;
-    };
 
 // ============================================================================
 // Decay Rules (used by Supplies and optionally by Global Resources)
@@ -53,7 +43,7 @@ export type DecayRule =
       /** Fraction retained each cycle, e.g. 0.5 keeps 50% */
       retainRatio: number;
       round?: 'floor' | 'ceil' | 'round';
-      /** Minimum decay step when value > 0 (prevents getting stuck at 1) */
+      /** Minimum decay step when value > 0 */
       minStep?: number;
     };
 
@@ -65,12 +55,10 @@ interface BaseResourceManifest {
   id: ResourceId;
   name: string;
   shortName?: string;
-  description: string;
+  description?: string;
   color: string;
   initialValue: number;
-  /** Optional tags used by modules (e.g. ['storable'] for Warehouse) */
   tags?: string[];
-  /** Optional Phase 2 decay rule */
   decay?: DecayRule;
 }
 
@@ -80,7 +68,6 @@ export interface UnlimitedResourceManifest extends BaseResourceManifest {
 
 export interface CappedResourceManifest extends BaseResourceManifest {
   kind: 'capped';
-  /** Base maximum capacity before dynamic cell cap bonuses */
   initialMax: number;
 }
 
@@ -95,26 +82,23 @@ export type ResourceManifest =
 export interface SupplyManifest {
   id: SupplyId;
   name: string;
-  description: string;
+  description?: string;
   color: string;
-  /** Reference value for 100% heatmap intensity */
   maxExpected: number;
-  /** Optional hard stacking cap per tile after Phase 3 production */
   maxAmount?: number;
-  /** Phase 2 decay applied to remaining unconsumed supply on each tile */
   decay: DecayRule;
 }
 
 export interface SupplyEmission {
-  supplyId: SupplyId;
+  id: SupplyId;
   amount: number;
   radius: number;
   neighborhood: NeighborhoodType;
-  includeSelf: boolean;
+  includeSelf?: boolean;
 }
 
 // ============================================================================
-// New-Game Setup Options & World Generator
+// Setup Options & Declarative World Generator Pipeline
 // ============================================================================
 
 export interface MapSizePreset {
@@ -161,9 +145,44 @@ export interface WorldSetupValues {
   params: Record<string, string | number | boolean>;
 }
 
+export type GeneratorStep =
+  | {
+      type: 'fill';
+      cell: CellTypeId;
+    }
+  | {
+      type: 'clusters';
+      cell: CellTypeId;
+      clustersPer768: number;
+      minClusters?: number;
+      minSize: number;
+      maxSize: number;
+      onlyOnEmpty?: boolean;
+      densityParam?: string;
+    }
+  | {
+      type: 'scatter';
+      cell: CellTypeId;
+      countPer768: number;
+      minCount?: number;
+      onlyOnEmpty?: boolean;
+      densityParam?: string;
+    }
+  | {
+      type: 'placeNear';
+      cell: CellTypeId;
+      nearCell: CellTypeId;
+      radius?: number;
+      neighborhood?: 'moore' | 'vonNeumann';
+      chance: number;
+      maxCount?: number;
+      onlyOnEmpty?: boolean;
+    };
+
 export interface GridMutator {
   readonly width: number;
   readonly height: number;
+  readonly defaultCellTypeId: CellTypeId;
   clear: () => void;
   getCell: (x: number, y: number) => CellTypeId;
   setCell: (x: number, y: number, cellTypeId: CellTypeId) => void;
@@ -171,101 +190,307 @@ export interface GridMutator {
 
 export type SeededRng = () => number;
 
-export type WorldGeneratorFn<TParams = Record<string, unknown>> = (
-  grid: GridMutator,
-  setup: WorldSetupValues,
-  params: TParams,
-  rng: SeededRng
-) => void;
-
 // ============================================================================
-// Cell Manifest (JSON-serializable cell definition)
+// Declarative Condition Primitives
 // ============================================================================
 
-export type CellGlyph =
-  | 'solid'
-  | 'farm'
-  | 'house'
-  | 'water'
-  | 'forest'
-  | 'mountain'
-  | 'sawmill'
-  | 'quarry'
-  | 'warehouse'
-  | 'empty';
+export type Condition =
+  | {
+      type: 'supply';
+      id: SupplyId;
+      op: CompareOp;
+      value: number;
+    }
+  | {
+      type: 'resource';
+      id: ResourceId;
+      op: CompareOp;
+      value: number;
+    }
+  | {
+      type: 'state';
+      key: string;
+      op: CompareOp;
+      value: CellStateValue;
+    }
+  | {
+      type: 'neighbors';
+      cell: CellTypeId;
+      op: CompareOp;
+      value: number;
+      radius?: number;
+      neighborhood?: 'moore' | 'vonNeumann';
+    }
+  | {
+      type: 'chance';
+      probability: number;
+    }
+  | {
+      type: 'any';
+      conditions: Condition[];
+    }
+  | {
+      type: 'not';
+      condition: Condition;
+    };
+
+// ============================================================================
+// Declarative Action Primitives & Rules
+// ============================================================================
+
+export type UiClickAction =
+  | { type: 'openBuildMenu'; options: CellTypeId[] }
+  | { type: 'openPanel' }
+  | { type: 'openDemolishConfirm' };
+
+export type Action =
+  | { type: 'addResource'; id: ResourceId; amount: number }
+  | { type: 'consumeResource'; id: ResourceId; amount: number }
+  | { type: 'consumeSupply'; id: SupplyId; amount: number }
+  | {
+      type: 'emitSupply';
+      id: SupplyId;
+      amount: number;
+      radius: number;
+      neighborhood: NeighborhoodType;
+      includeSelf?: boolean;
+    }
+  | { type: 'setState'; key: string; value: CellStateValue }
+  | {
+      type: 'addState';
+      key: string;
+      amount: number;
+      min?: number;
+      max?: number;
+    }
+  | { type: 'transform'; to: CellTypeId }
+  | {
+      type: 'notify';
+      severity: NotificationSeverity;
+      title: string;
+      message: string;
+    }
+  | {
+      type: 'refundStateToResource';
+      stateKey: string;
+      resourceId: ResourceId;
+    }
+  | {
+      type: 'reclaimResource';
+      resourceId: ResourceId;
+      amount: number;
+      fallbackStateKey?: string;
+    }
+  | UiClickAction;
+
+export interface Rule {
+  when?: Condition[];
+  do: Action[];
+  else?: Action[];
+  stop?: boolean;
+  label?: string;
+  tone?: StatusTone;
+}
+
+// ============================================================================
+// Passive Cell Modifiers
+// ============================================================================
+
+export type CellModifier = {
+  type: 'capBonus';
+  resource?: ResourceId;
+  resourceFromState?: string;
+  amount: number;
+};
+
+// ============================================================================
+// Declarative Visuals, Conditional Styles & Indicators
+// ============================================================================
+
+export type { CellIcon } from './icons';
+
+export type ValidationSection =
+  | 'general'
+  | 'resources'
+  | 'supplies'
+  | 'generator'
+  | 'cells';
+
+export interface ValidationIssue {
+  section: ValidationSection;
+  cellId?: CellTypeId;
+  path: string;
+  message: string;
+}
+
+export interface VisualRule {
+  when?: Condition[];
+  color?: string;
+  icon?: CellIcon;
+  glyph?: string;
+  border?: 'solid' | 'dashed';
+  dim?: boolean;
+}
+
+export type VisualIndicator =
+  | {
+      kind: 'dot';
+      position: 'bottomRight' | 'topLeft' | 'bottomLeft';
+      when?: Condition[];
+      color: string;
+      inactiveColor?: string;
+    }
+  | {
+      kind: 'bar';
+      when?: Condition[];
+      color?: string;
+      colorFromResourceState?: string;
+    };
 
 export interface CellVisualManifest {
   color: string;
-  glyph?: CellGlyph;
+  icon?: CellIcon;
+  /** Optional 1-2 character symbol or letter rendered centered on the cell */
+  glyph?: string;
+  /** Render full-tile fill (ideal for terrain) instead of inset frame (structures) */
+  fullTile?: boolean;
   /** Optional custom SVG path in a 24x24 viewBox rendered via Canvas Path2D */
   svgPath?: string;
   /** Optional background substrate color tint */
   substrateColor?: string;
+  border?: 'solid' | 'dashed';
+  dim?: boolean;
+  rules?: VisualRule[];
+  indicators?: VisualIndicator[];
 }
 
-export type CellClickAction =
-  | { kind: 'none' }
-  | { kind: 'setCell'; cellTypeId: CellTypeId }
-  | { kind: 'openBuildMenu'; options: CellTypeId[] }
-  | { kind: 'openPanel' }
-  | { kind: 'openDemolishConfirm' };
+export interface ResolvedVisualState {
+  color: string;
+  icon?: CellIcon;
+  glyph?: string;
+  fullTile?: boolean;
+  svgPath?: string;
+  substrateColor?: string;
+  border: 'solid' | 'dashed';
+  dim: boolean;
+  indicators: ResolvedVisualIndicator[];
+}
+
+export type ResolvedVisualIndicator =
+  | {
+      kind: 'dot';
+      position: 'bottomRight' | 'topLeft' | 'bottomLeft';
+      filled: boolean;
+      color: string;
+    }
+  | {
+      kind: 'bar';
+      color: string;
+    };
+
+export interface CellBadgeRule {
+  when?: Condition[];
+  text: string;
+  tone?: StatusTone;
+}
+
+// ============================================================================
+// Declarative Cell UI Panel Blocks
+// ============================================================================
+
+export type PanelBlock =
+  | {
+      type: 'stat';
+      label: string;
+      /** Template string (e.g. "{{supply.moisture}}", "{{state.idle}} cycles") or "cycleOutput" */
+      value: string;
+      when?: Condition[];
+      tone?: StatusTone;
+      toneWhen?: { when: Condition[]; tone: StatusTone }[];
+    }
+  | {
+      type: 'transfer';
+      label: string;
+      resource: ResourceId;
+      stateKey: string;
+      min: number;
+      max: number;
+      step?: number;
+      assignLabel?: string;
+      removeLabel?: string;
+      resetKeys?: string[];
+      clearNotifications?: boolean;
+    }
+  | {
+      type: 'resourceSelect';
+      label?: string;
+      bonusText?: string;
+      stateKey: string;
+      kind?: 'capped' | 'unlimited';
+      tag?: string;
+    }
+  | {
+      type: 'actionButton';
+      label: string;
+      when?: Condition[];
+      cost?: ResourceDelta;
+      do: Action[];
+      tone?: 'primary' | 'neutral' | 'danger';
+      closeAfter?: boolean;
+      sound?: SoundKind;
+    };
+
+// ============================================================================
+// Cell Type & Top-Level Ruleset Manifest (Schema v2)
+// ============================================================================
 
 export interface CellTypeManifest {
   id: CellTypeId;
   name: string;
-  description: string;
-  shortRule: string;
-  visual: CellVisualManifest;
+  description?: string;
+  shortRule?: string;
   initialState?: CellStateData;
-  emissions?: SupplyEmission[];
-  /** Positive resource amounts deducted on construction */
   buildCost?: ResourceDelta;
-  /** Immediate global resource delta applied on construction */
-  onBuildEffect?: ResourceDelta;
-  /** Global resource delta applied on manual demolition */
-  onDemolishEffect?: ResourceDelta;
-  /** Cell type restored on manual demolition (defaults to manifest.defaultCellTypeId) */
   demolishTo?: CellTypeId;
-  /** Static resource max-capacity bonus while this cell exists (e.g. House +1 population max) */
-  capBonus?: ResourceDelta;
+  priorityByState?: string;
+  modifiers?: CellModifier[];
+  visual: CellVisualManifest;
+  badges?: CellBadgeRule[];
   onClick?: {
-    left?: CellClickAction;
-    right?: CellClickAction;
+    left?: Rule[];
+    right?: Rule[];
   };
-  /** Optional TS behavior module ref (+ optional params) */
-  behavior?: ModuleRef;
-  /** Optional TSX panel module ref (+ optional params), rendered on openPanel */
-  panel?: ModuleRef;
+  onBuild?: Rule[];
+  onCycle?: Rule[];
+  onDemolish?: Rule[];
+  onLost?: Rule[];
+  panel?: PanelBlock[];
 }
 
-// ============================================================================
-// Top-Level Ruleset Manifest (ruleset.json)
-// ============================================================================
-
 export interface RulesetManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
-  description: string;
+  description?: string;
   author?: string;
-  boundaryMode: BoundaryMode;
-  defaultOverlayMode: SupplyOverlayMode;
   defaultGridSize: { width: number; height: number };
   defaultCellTypeId: CellTypeId;
-  /** Number of cycles executed automatically on new game start (default 1) */
   initialCycles?: number;
   setupOptions?: SetupOptionsManifest;
-  worldGenerator: ModuleRef;
+  worldGenerator: GeneratorStep[];
   resources: ResourceManifest[];
   supplies: SupplyManifest[];
   cellTypes: CellTypeManifest[];
 }
 
-// ============================================================================
-// Notifications & Cycle Outcomes
-// ============================================================================
+export interface RulesetEntry {
+  manifest: RulesetManifest;
+  isCustom: boolean;
+}
 
-export type NotificationSeverity = 'warning' | 'danger';
+// ============================================================================
+// Runtime Outcomes, Inspection, Stats & Serialization
+// ============================================================================
 
 export interface CellNotificationDraft {
   severity: NotificationSeverity;
@@ -283,192 +508,34 @@ export interface CellNotification extends CellNotificationDraft {
 
 export interface CellTickOutcome {
   nextTypeId: CellTypeId;
-  /** Updated per-cell state persisted if cell stays the same type */
-  nextState?: CellStateData | null;
-  /** Spatial supplies physically subtracted from this cell's tile buffer in Phase 1 */
-  consumed?: Record<SupplyId, number>;
-  /** Positive global resource amounts consumed from the shared pool in Phase 1 */
-  consumedResources?: ResourceDelta;
-  /** Global resources produced in Phase 3 for the next cycle */
-  producedResources?: ResourceDelta;
-  /** Whether this cell's spatial emissions fire in Phase 3 */
-  canEmit?: boolean;
-  /** Optional notification emitted by this cell */
-  notification?: CellNotificationDraft | null;
+  nextState: CellStateData | null;
+  consumedSupplies: Record<SupplyId, number>;
+  consumedResources: ResourceDelta;
+  producedResources: ResourceDelta;
+  emissions: SupplyEmission[];
+  notification: CellNotificationDraft | null;
+  matchedLabel?: string;
+  matchedTone?: StatusTone;
+  firstFailedConditions?: Condition[];
 }
 
-export interface TransitionExplanation {
-  nextTypeId: CellTypeId;
-  label: string;
-  tone: StatusTone;
+export interface ClickExecutionResult {
+  uiAction: UiClickAction | null;
+  mutated: boolean;
 }
 
 export interface DemolishInfo {
-  lines?: { label: string; value: string; tone?: StatusTone }[];
-  warnings?: string[];
+  lines: { label: string; value: string; tone?: StatusTone }[];
+  warnings: string[];
 }
-
-// ============================================================================
-// World API (Pure engine surface exposed to TS behaviors & TSX panels)
-// ============================================================================
-
-export interface WorldCellSnapshot {
-  x: number;
-  y: number;
-  cellTypeId: CellTypeId;
-  state: CellStateData;
-}
-
-export interface WorldApi {
-  readonly width: number;
-  readonly height: number;
-  readonly cycle: number;
-  readonly manifest: RulesetManifest;
-  getResource: (id: ResourceId) => number;
-  getResourceCap: (id: ResourceId) => number | null;
-  getResources: () => Record<ResourceId, number>;
-  getResourceCaps: () => Record<ResourceId, number | null>;
-  addResource: (id: ResourceId, delta: number) => void;
-  consumeResource: (id: ResourceId, amount: number) => boolean;
-  getCellTypeIdAt: (x: number, y: number) => CellTypeId;
-  getCellStateAt: (x: number, y: number) => CellStateData;
-  patchCellState: (x: number, y: number, patch: CellStateData) => void;
-  getLocalSupplies: (x: number, y: number) => Record<SupplyId, number>;
-  clearNotificationsAt: (x: number, y: number) => void;
-  reconcileResourceCaps: () => void;
-  findCells: (
-    predicate: (cell: WorldCellSnapshot) => boolean
-  ) => WorldCellSnapshot[];
-}
-
-// ============================================================================
-// TS Behavior & TSX Panel Module Contracts (Only 2 Context Shapes)
-// ============================================================================
-
-/**
- * Read-only snapshot passed to evaluation/inspection hooks.
- * During `onCycle` and `explainCycle`, `resources` reflects the live remaining pool.
- */
-export interface CellContext {
-  x: number;
-  y: number;
-  cellType: ResolvedCellType;
-  state: CellStateData;
-  supplies: Record<SupplyId, number>;
-  resources: Record<ResourceId, number>;
-  resourceCaps: Record<ResourceId, number | null>;
-  manifest: RulesetManifest;
-}
-
-/**
- * Mutating context passed to lifecycle hooks (`onBuild`, `onDemolish`, `onTickLost`).
- */
-export interface CellLifecycleContext {
-  x: number;
-  y: number;
-  cellType: ResolvedCellType;
-  state: CellStateData;
-  world: WorldApi;
-}
-
-export interface CellBehaviorModule<TParams = Record<string, unknown>> {
-  createInitialState?: (params: TParams) => CellStateData;
-  getConsumePriority?: (state: CellStateData, params: TParams) => number;
-  getCapBonus?: (state: CellStateData, params: TParams) => ResourceDelta | null;
-  isActive?: (ctx: CellContext, params: TParams) => boolean;
-  onCycle?: (ctx: CellContext, params: TParams) => CellTickOutcome;
-  onBuild?: (ctx: CellLifecycleContext, params: TParams) => void;
-  onDemolish?: (ctx: CellLifecycleContext, params: TParams) => void;
-  onTickLost?: (ctx: CellLifecycleContext, params: TParams) => void;
-  getStatusBadge?: (ctx: CellContext, params: TParams) => StatusBadge | null;
-  getBuildPreview?: (ctx: CellContext, params: TParams) => StatusBadge | null;
-  explainCycle?: (ctx: CellContext, params: TParams) => TransitionExplanation;
-  getDemolishInfo?: (ctx: CellContext, params: TParams) => DemolishInfo;
-}
-
-export interface CellPanelProps<TParams = Record<string, unknown>> {
-  x: number;
-  y: number;
-  cellType: ResolvedCellType;
-  cellState: CellStateData;
-  localSupplies: Record<SupplyId, number>;
-  world: WorldApi;
-  params: TParams;
-  onMutated: (sound?: SoundKind) => void;
-  onClose: () => void;
-}
-
-export type CellPanelComponent<TParams = Record<string, unknown>> =
-  ComponentType<CellPanelProps<TParams>>;
-
-// ============================================================================
-// Ruleset Package & Compiled Runtime Types
-// ============================================================================
-
-export interface RulesetModuleMap {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  generators?: Record<string, WorldGeneratorFn<any>>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  behaviors?: Record<string, CellBehaviorModule<any>>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  panels?: Record<string, CellPanelComponent<any>>;
-}
-
-export interface RulesetPackage {
-  manifest: RulesetManifest;
-  modules?: RulesetModuleMap;
-}
-
-export interface ResolvedCellType {
-  id: CellTypeId;
-  name: string;
-  description: string;
-  shortRule: string;
-  visual: CellVisualManifest;
-  emissions: SupplyEmission[];
-  initialState?: CellStateData;
-  buildCost?: ResourceDelta;
-  onBuildEffect?: ResourceDelta;
-  onDemolishEffect?: ResourceDelta;
-  demolishTo?: CellTypeId;
-  capBonus?: ResourceDelta;
-  onClick: {
-    left: CellClickAction;
-    right: CellClickAction;
-  };
-  behavior?: {
-    ref: string;
-    module: CellBehaviorModule<Record<string, unknown>>;
-    params: Record<string, unknown>;
-  };
-  panel?: {
-    ref: string;
-    component: CellPanelComponent<Record<string, unknown>>;
-    params: Record<string, unknown>;
-  };
-}
-
-export interface CompiledRuleset {
-  manifest: RulesetManifest;
-  generator: {
-    ref: string;
-    fn: WorldGeneratorFn<Record<string, unknown>>;
-    params: Record<string, unknown>;
-  };
-  cellTypes: ResolvedCellType[];
-}
-
-// ============================================================================
-// Inspection, Stats, Step & Serialization Contracts
-// ============================================================================
 
 export interface CellInspection {
   x: number;
   y: number;
-  cellType: ResolvedCellType;
+  cellType: CellTypeManifest;
   state: CellStateData;
   supplies: Record<SupplyId, number>;
-  nextCellType: ResolvedCellType;
+  nextCellType: CellTypeManifest;
   willChange: boolean;
   transitionLabel: string;
   transitionTone: StatusTone;

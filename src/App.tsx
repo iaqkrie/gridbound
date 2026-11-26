@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BuildMenu, BuildMenuState } from './components/BuildMenu';
 import { CanvasHudBottom } from './components/CanvasHudBottom';
+import { CellPanelView } from './components/CellPanelView';
 import { CellPopover } from './components/CellPopover';
 import {
   DemolishConfirm,
@@ -13,22 +14,29 @@ import { MainMenu } from './components/MainMenu';
 import { NotificationBanner } from './components/NotificationBanner';
 import { SupplyFilterOverlay } from './components/SupplyFilterOverlay';
 import { TopBar } from './components/TopBar';
+import {
+  EditorSelection,
+  RulesetEditor,
+} from './components/editor/RulesetEditor';
 import { SimulationCore } from './engine/SimulationCore';
 import {
   CellNotification,
   CellTypeId,
   GridCoordinate,
   MouseButton,
+  RulesetEntry,
+  RulesetManifest,
   SupplyId,
   SupplyOverlayMode,
   WorldSetupValues,
+  generateRandomSeed,
 } from './engine/sdk';
 import { SaveSlot, saveStore } from './engine/saveStore';
 import { t } from './i18n';
-import { RULESETS, getRulesetById } from './rulesets';
+import { RulesetImportResult, rulesetStore } from './rulesets';
 import { SoundKind, playTacticalSound } from './utils/sound';
 
-type ScreenMode = 'MENU' | 'PLAYING';
+type ScreenMode = 'MENU' | 'PLAYING' | 'EDITOR' | 'EDITOR_PLAYTEST';
 
 interface CellPanelMenuState {
   cellX: number;
@@ -37,17 +45,42 @@ interface CellPanelMenuState {
   screenY: number;
 }
 
+function buildDefaultSandboxSetup(manifest: RulesetManifest): WorldSetupValues {
+  const params: Record<string, string | number | boolean> = {};
+  for (const p of manifest.setupOptions?.params ?? []) {
+    params[p.id] = p.defaultValue;
+  }
+  return {
+    width: manifest.defaultGridSize.width,
+    height: manifest.defaultGridSize.height,
+    seed: generateRandomSeed(),
+    params,
+  };
+}
+
 export default function App() {
   const [screen, setScreen] = useState<ScreenMode>('MENU');
+  const [rulesets, setRulesets] = useState<RulesetEntry[]>(() =>
+    rulesetStore.list()
+  );
   const [saves, setSaves] = useState<SaveSlot[]>(() => saveStore.list());
   const [activeSaveId, setActiveSaveId] = useState<string | null>(null);
   const [activeSaveName, setActiveSaveName] = useState<string>('');
   const [showExitConfirm, setShowExitConfirm] = useState(false);
 
+  // Ruleset Studio state (persisted across Test Play <-> Editor switches)
+  const [editorDraft, setEditorDraft] = useState<RulesetManifest | null>(null);
+  const [editorSourceId, setEditorSourceId] = useState<string | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [editorSelection, setEditorSelection] = useState<EditorSelection>({
+    section: 'cells',
+  });
+
+  // Simulation runtime state
   const [core, setCore] = useState<SimulationCore | null>(null);
   const [renderVersion, setRenderVersion] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [overlayMode, setOverlayMode] = useState<SupplyOverlayMode>('heatmap');
+  const [overlayMode, setOverlayMode] = useState<SupplyOverlayMode>('off');
   const [activeSupplyId, setActiveSupplyId] = useState<SupplyId | null>(null);
   const [zoomPercent, setZoomPercent] = useState(100);
   const [hoveredCell, setHoveredCell] = useState<GridCoordinate | null>(null);
@@ -80,18 +113,151 @@ export default function App() {
     setRenderVersion((v) => v + 1);
   }, []);
 
+  const handleImportRuleset = useCallback(
+    (rawJson: string): RulesetImportResult => {
+      const result = rulesetStore.importFromJson(rawJson);
+      if (result.ok) {
+        setRulesets(rulesetStore.list());
+        playTacticalSound('build', soundEnabled);
+      }
+      return result;
+    },
+    [soundEnabled]
+  );
+
+  const handleDeleteRuleset = useCallback(
+    (rulesetId: string) => {
+      if (rulesetStore.remove(rulesetId)) {
+        setRulesets(rulesetStore.list());
+        playTacticalSound('erase', soundEnabled);
+      }
+    },
+    [soundEnabled]
+  );
+
+  // ============================================================================
+  // Ruleset Studio Lifecycle Handlers
+  // ============================================================================
+
+  const handleCreateRuleset = useCallback(() => {
+    const draft = rulesetStore.createBlankDraft();
+    setEditorDraft(draft);
+    setEditorSourceId(null);
+    setEditorDirty(true);
+    setEditorSelection({ section: 'cells', cellId: draft.cellTypes[0]?.id });
+    setScreen('EDITOR');
+    playTacticalSound('click', soundEnabled);
+  }, [soundEnabled]);
+
+  const handleEditRuleset = useCallback(
+    (rulesetId: string) => {
+      const raw = rulesetStore.getById(rulesetId);
+      const copy: RulesetManifest = JSON.parse(JSON.stringify(raw));
+      setEditorDraft(copy);
+      setEditorSourceId(rulesetStore.isBuiltin(rulesetId) ? null : rulesetId);
+      setEditorDirty(false);
+      setEditorSelection({ section: 'cells', cellId: copy.cellTypes[0]?.id });
+      setScreen('EDITOR');
+      playTacticalSound('click', soundEnabled);
+    },
+    [soundEnabled]
+  );
+
+  const handleCloneRuleset = useCallback(
+    (rulesetId: string) => {
+      const copy = rulesetStore.cloneDraft(rulesetId);
+      setEditorDraft(copy);
+      setEditorSourceId(null);
+      setEditorDirty(true);
+      setEditorSelection({ section: 'cells', cellId: copy.cellTypes[0]?.id });
+      setScreen('EDITOR');
+      playTacticalSound('click', soundEnabled);
+    },
+    [soundEnabled]
+  );
+
+  const handleChangeDraft = useCallback((next: RulesetManifest) => {
+    setEditorDraft(next);
+    setEditorDirty(true);
+  }, []);
+
+  const handleSaveEditorDraft = useCallback((): {
+    ok: boolean;
+    errors?: string[];
+  } => {
+    if (!editorDraft) return { ok: false, errors: ['No active draft'] };
+    const result = rulesetStore.saveCustom(editorDraft, editorSourceId);
+    if (result.ok && result.entry) {
+      setRulesets(rulesetStore.list());
+      setEditorSourceId(result.entry.manifest.id);
+      setEditorDirty(false);
+      playTacticalSound('build', soundEnabled);
+      return { ok: true };
+    }
+    return { ok: false, errors: result.errors };
+  }, [editorDraft, editorSourceId, soundEnabled]);
+
+  const launchSandboxForDraft = useCallback(
+    (draft: RulesetManifest) => {
+      const setup = buildDefaultSandboxSetup(draft);
+      const sandboxCore = SimulationCore.createNewGame(draft, setup);
+      setCore(sandboxCore);
+      setActiveSaveId(null);
+      setActiveSaveName(draft.name);
+      setOverlayMode('off');
+      setActiveSupplyId(draft.supplies[0]?.id ?? null);
+      setHoveredCell(null);
+      setFocusedNotificationId(null);
+      setHighlightedCell(null);
+      setShowExitConfirm(false);
+      closeOverlays();
+      setScreen('EDITOR_PLAYTEST');
+      setRenderVersion((v) => v + 1);
+      playTacticalSound('build', soundEnabled);
+    },
+    [closeOverlays, soundEnabled]
+  );
+
+  const handleStartTestPlay = useCallback(() => {
+    if (!editorDraft) return;
+    launchSandboxForDraft(editorDraft);
+  }, [editorDraft, launchSandboxForDraft]);
+
+  const handleRerollSandboxSeed = useCallback(() => {
+    if (!editorDraft) return;
+    launchSandboxForDraft(editorDraft);
+  }, [editorDraft, launchSandboxForDraft]);
+
+  const handleBackToEditor = useCallback(() => {
+    closeOverlays();
+    setHoveredCell(null);
+    setFocusedNotificationId(null);
+    setHighlightedCell(null);
+    setScreen('EDITOR');
+    playTacticalSound('click', soundEnabled);
+  }, [closeOverlays, soundEnabled]);
+
+  const handleExitEditor = useCallback(() => {
+    setScreen('MENU');
+    playTacticalSound('click', soundEnabled);
+  }, [soundEnabled]);
+
+  // ============================================================================
+  // Standard Game Lifecycle Handlers
+  // ============================================================================
+
   const handleStartNewGame = useCallback(
     (rulesetId: string, saveName: string, setup: WorldSetupValues) => {
-      const ruleset = getRulesetById(rulesetId);
-      const nextCore = SimulationCore.createNewGame(ruleset, setup);
+      const manifest = rulesetStore.getById(rulesetId);
+      const nextCore = SimulationCore.createNewGame(manifest, setup);
       const slot = saveStore.create(saveName, nextCore);
 
       setSaves(saveStore.list());
       setCore(nextCore);
       setActiveSaveId(slot.id);
       setActiveSaveName(slot.name);
-      setOverlayMode(ruleset.manifest.defaultOverlayMode);
-      setActiveSupplyId(ruleset.manifest.supplies[0]?.id ?? null);
+      setOverlayMode('off');
+      setActiveSupplyId(manifest.supplies[0]?.id ?? null);
       setHoveredCell(null);
       setFocusedNotificationId(null);
       setHighlightedCell(null);
@@ -108,14 +274,14 @@ export default function App() {
     (saveId: string) => {
       const slot = saveStore.get(saveId);
       if (!slot) return;
-      const ruleset = getRulesetById(slot.rulesetId);
-      const loadedCore = SimulationCore.deserialize(ruleset, slot.snapshot);
+      const manifest = rulesetStore.getById(slot.rulesetId);
+      const loadedCore = SimulationCore.deserialize(manifest, slot.snapshot);
 
       setCore(loadedCore);
       setActiveSaveId(slot.id);
       setActiveSaveName(slot.name);
-      setOverlayMode(ruleset.manifest.defaultOverlayMode);
-      setActiveSupplyId(ruleset.manifest.supplies[0]?.id ?? null);
+      setOverlayMode('off');
+      setActiveSupplyId(manifest.supplies[0]?.id ?? null);
       setHoveredCell(null);
       setFocusedNotificationId(null);
       setHighlightedCell(null);
@@ -138,9 +304,13 @@ export default function App() {
   );
 
   const handleRequestExit = useCallback(() => {
+    if (screen === 'EDITOR_PLAYTEST') {
+      handleBackToEditor();
+      return;
+    }
     closeOverlays();
     setShowExitConfirm(true);
-  }, [closeOverlays]);
+  }, [screen, handleBackToEditor, closeOverlays]);
 
   const handleSaveAndExit = useCallback(() => {
     if (core && activeSaveId) {
@@ -186,9 +356,14 @@ export default function App() {
       if (!core) return;
       setHighlightedCell(null);
       setFocusedNotificationId(null);
-      const action = core.handleCellClick(x, y, button);
 
-      if (action.kind === 'openBuildMenu') {
+      const res = core.handleCellClick(x, y, button);
+      if (res.mutated) {
+        bumpRender();
+      }
+
+      const uiAction = res.uiAction;
+      if (uiAction?.type === 'openBuildMenu') {
         setPanelMenu(null);
         setDemolishMenu(null);
         setBuildMenu({
@@ -196,13 +371,13 @@ export default function App() {
           cellY: y,
           screenX,
           screenY,
-          options: action.options,
+          options: uiAction.options,
         });
         setPreviewCellTypeId(null);
         playTacticalSound('click', soundEnabled);
-      } else if (action.kind === 'openPanel') {
+      } else if (uiAction?.type === 'openPanel') {
         const cellType = core.getCellTypeAt(x, y);
-        if (!cellType.panel) {
+        if (!cellType.panel || cellType.panel.length === 0) {
           closeOverlays();
           return;
         }
@@ -216,7 +391,7 @@ export default function App() {
           screenY,
         });
         playTacticalSound('click', soundEnabled);
-      } else if (action.kind === 'openDemolishConfirm') {
+      } else if (uiAction?.type === 'openDemolishConfirm') {
         const cellType = core.getCellTypeAt(x, y);
         setBuildMenu(null);
         setPanelMenu(null);
@@ -229,12 +404,11 @@ export default function App() {
           cellType,
         });
         playTacticalSound('click', soundEnabled);
-      } else if (action.kind === 'setCell') {
-        closeOverlays();
-        bumpRender();
-        playTacticalSound('build', soundEnabled);
       } else {
         closeOverlays();
+        if (res.mutated) {
+          playTacticalSound('build', soundEnabled);
+        }
       }
     },
     [core, closeOverlays, bumpRender, soundEnabled]
@@ -300,9 +474,11 @@ export default function App() {
     setViewportSize({ width, height });
   }, []);
 
-  // Global keyboard shortcuts during active game
+  const isGameActive = screen === 'PLAYING' || screen === 'EDITOR_PLAYTEST';
+
+  // Global keyboard shortcuts during active game or sandbox playtest
   useEffect(() => {
-    if (screen !== 'PLAYING') return;
+    if (!isGameActive) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -334,7 +510,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [screen, showExitConfirm, closeOverlays, handleNextTurn]);
+  }, [isGameActive, showExitConfirm, closeOverlays, handleNextTurn]);
 
   const stats = useMemo(() => {
     if (!core) return null;
@@ -356,40 +532,56 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, inspectedCoord?.x, inspectedCoord?.y, renderVersion]);
 
-  const buildMenuSupplies = useMemo(() => {
-    if (!core || !buildMenu) return {};
-    return core.getLocalSupplies(buildMenu.cellX, buildMenu.cellY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [core, buildMenu?.cellX, buildMenu?.cellY, renderVersion]);
-
-  const panelMenuData = useMemo(() => {
+  const panelMenuCellType = useMemo(() => {
     if (!core || !panelMenu) return null;
-    return {
-      cellType: core.getCellTypeAt(panelMenu.cellX, panelMenu.cellY),
-      state: core.getCellStateAt(panelMenu.cellX, panelMenu.cellY),
-      supplies: core.getLocalSupplies(panelMenu.cellX, panelMenu.cellY),
-    };
+    return core.getCellTypeAt(panelMenu.cellX, panelMenu.cellY);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, panelMenu?.cellX, panelMenu?.cellY, renderVersion]);
 
   const demolishInfo = useMemo(() => {
-    if (!core || !demolishMenu) return {};
+    if (!core || !demolishMenu) return { lines: [], warnings: [] };
     return core.getDemolishInfo(demolishMenu.cellX, demolishMenu.cellY);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, demolishMenu?.cellX, demolishMenu?.cellY, renderVersion]);
 
+  // ============================================================================
+  // Screen Routing
+  // ============================================================================
+
+  if (screen === 'EDITOR' && editorDraft) {
+    return (
+      <RulesetEditor
+        draft={editorDraft}
+        isDirty={editorDirty}
+        selection={editorSelection}
+        onChangeDraft={handleChangeDraft}
+        onChangeSelection={setEditorSelection}
+        onSave={handleSaveEditorDraft}
+        onTestPlay={handleStartTestPlay}
+        onExit={handleExitEditor}
+      />
+    );
+  }
+
   if (screen === 'MENU' || !core || !stats) {
     return (
       <MainMenu
-        rulesets={RULESETS}
+        rulesets={rulesets}
         saves={saves}
         defaultSaveName={saveStore.nextDefaultName()}
         onStartNewGame={handleStartNewGame}
         onLoadSave={handleLoadSave}
         onDeleteSave={handleDeleteSave}
+        onImportRuleset={handleImportRuleset}
+        onDeleteRuleset={handleDeleteRuleset}
+        onCreateRuleset={handleCreateRuleset}
+        onEditRuleset={handleEditRuleset}
+        onCloneRuleset={handleCloneRuleset}
       />
     );
   }
+
+  const isSandbox = screen === 'EDITOR_PLAYTEST';
 
   const resolvedSupplyId =
     activeSupplyId &&
@@ -405,15 +597,15 @@ export default function App() {
         ? { x: demolishMenu.cellX, y: demolishMenu.cellY }
         : null;
 
-  const ActivePanelComponent = panelMenuData?.cellType.panel?.component ?? null;
-
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0B0F14] text-[#E6EDF3] overflow-hidden">
       <TopBar
         saveName={activeSaveName}
         resources={core.manifest.resources}
         stats={stats}
+        isSandbox={isSandbox}
         onRequestExit={handleRequestExit}
+        onRerollSeed={isSandbox ? handleRerollSandboxSeed : undefined}
         onNextTurn={handleNextTurn}
       />
 
@@ -478,10 +670,14 @@ export default function App() {
             menu={buildMenu}
             manifest={core.manifest}
             cellTypes={core.getCellTypes()}
-            currentResources={stats.resources}
-            resourceCaps={stats.resourceCaps}
-            localSupplies={buildMenuSupplies}
             checkAffordability={(cellTypeId) => core.canAfford(cellTypeId)}
+            getBuildPreview={(cellTypeId) =>
+              core.getBuildPreview(
+                buildMenu.cellX,
+                buildMenu.cellY,
+                cellTypeId
+              )
+            }
             containerWidth={viewportSize.width}
             containerHeight={viewportSize.height}
             onSelect={handleBuildSelect}
@@ -491,12 +687,12 @@ export default function App() {
         )}
 
         {panelMenu &&
-          panelMenuData &&
-          panelMenuData.cellType.panel &&
-          ActivePanelComponent && (
+          panelMenuCellType &&
+          panelMenuCellType.panel &&
+          panelMenuCellType.panel.length > 0 && (
             <CellPopover
-              title={panelMenuData.cellType.name}
-              swatchColor={panelMenuData.cellType.visual.color}
+              title={panelMenuCellType.name}
+              swatchColor={panelMenuCellType.visual.color}
               cellX={panelMenu.cellX}
               cellY={panelMenu.cellY}
               screenX={panelMenu.screenX}
@@ -505,18 +701,15 @@ export default function App() {
               containerHeight={viewportSize.height}
               width={272}
               estimatedHeight={220}
-              ariaLabel={panelMenuData.cellType.name}
+              ariaLabel={panelMenuCellType.name}
               closeAriaLabel={t('common.close')}
               onClose={closeOverlays}
             >
-              <ActivePanelComponent
+              <CellPanelView
+                core={core}
                 x={panelMenu.cellX}
                 y={panelMenu.cellY}
-                cellType={panelMenuData.cellType}
-                cellState={panelMenuData.state}
-                localSupplies={panelMenuData.supplies}
-                world={core.getWorldApi()}
-                params={panelMenuData.cellType.panel.params}
+                cellType={panelMenuCellType}
                 onMutated={handlePanelMutated}
                 onClose={closeOverlays}
               />
@@ -526,7 +719,6 @@ export default function App() {
         {demolishMenu && (
           <DemolishConfirm
             menu={demolishMenu}
-            resources={core.manifest.resources}
             demolishInfo={demolishInfo}
             containerWidth={viewportSize.width}
             containerHeight={viewportSize.height}
@@ -536,7 +728,7 @@ export default function App() {
         )}
       </main>
 
-      {showExitConfirm && (
+      {showExitConfirm && !isSandbox && (
         <ExitConfirmModal
           saveName={activeSaveName}
           cycle={stats.cycle}

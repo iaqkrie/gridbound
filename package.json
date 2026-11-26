@@ -2,7 +2,7 @@
   "name": "gridbound",
   "private": true,
   "version": "0.1.0-alpha",
-  "description": "Modular turn-based cellular strategy game and Ruleset SDK built around spatial supplies and global resources.",
+  "description": "Turn-based cellular strategy engine, declarative JSON Ruleset SDK, and visual Ruleset Studio built around spatial supplies and global resources.",
   "license": "MIT",
   "author": "iaqkrie & Gemini 4 Neon",
   "contributors": [

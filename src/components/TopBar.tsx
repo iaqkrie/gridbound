@@ -1,4 +1,4 @@
-import { ArrowLeft, SkipForward } from 'lucide-react';
+import { ArrowLeft, Dices, SkipForward } from 'lucide-react';
 import { ResourceManifest, SimulationStats } from '../engine/sdk';
 import { t } from '../i18n';
 
@@ -6,7 +6,9 @@ interface TopBarProps {
   saveName: string;
   resources: readonly ResourceManifest[];
   stats: SimulationStats;
+  isSandbox?: boolean;
   onRequestExit: () => void;
+  onRerollSeed?: () => void;
   onNextTurn: () => void;
 }
 
@@ -14,12 +16,14 @@ export function TopBar({
   saveName,
   resources,
   stats,
+  isSandbox = false,
   onRequestExit,
+  onRerollSeed,
   onNextTurn,
 }: TopBarProps) {
   return (
     <header className="h-14 shrink-0 bg-[#111720] border-b border-[#1F2A38] px-4 flex items-center justify-between gap-4 select-none">
-      {/* Zone 1: Menu button + Save title */}
+      {/* Zone 1: Menu/Editor Back button + Title (+ Sandbox New Seed) */}
       <div className="flex items-center gap-3 min-w-0 shrink-0">
         <button
           type="button"
@@ -27,14 +31,28 @@ export function TopBar({
           className="inline-flex items-center gap-1.5 text-xs font-medium text-[#8B98A9] hover:text-[#E6EDF3] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#10B981] rounded px-1.5 py-1"
         >
           <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>{t('common.menu')}</span>
+          <span>
+            {isSandbox ? t('sandbox.backToEditor') : t('common.menu')}
+          </span>
         </button>
         <span className="text-[#1F2A38]" aria-hidden="true">
           /
         </span>
-        <span className="text-sm font-semibold text-[#E6EDF3] whitespace-nowrap truncate max-w-[140px]">
+        <span className="text-sm font-semibold text-[#E6EDF3] whitespace-nowrap truncate max-w-[160px]">
           {saveName}
         </span>
+
+        {isSandbox && onRerollSeed && (
+          <button
+            type="button"
+            onClick={onRerollSeed}
+            title={t('sandbox.newSeed')}
+            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Dices className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{t('sandbox.newSeed')}</span>
+          </button>
+        )}
       </div>
 
       {/* Zone 2: Global Resources & Cycle Counter */}

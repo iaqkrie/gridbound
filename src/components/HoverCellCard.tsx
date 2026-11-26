@@ -29,7 +29,7 @@ export function HoverCellCard({ inspection, supplies }: HoverCellCardProps) {
             className="w-2.5 h-2.5 rounded-[2px] shrink-0 border border-white/15"
             style={{
               backgroundColor:
-                inspection.cellType.visual.glyph === 'empty'
+                inspection.cellType.visual.icon === 'empty'
                   ? '#1E293B'
                   : inspection.cellType.visual.color,
             }}
