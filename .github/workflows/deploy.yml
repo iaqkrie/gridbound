@@ -2,7 +2,8 @@ name: Deploy Release to GitHub Pages
 
 on:
   release:
-    types: [published, released, prereleased]
+    # "published" triggers once for BOTH regular releases and pre-releases
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -12,19 +13,20 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Official GitHub Pages recommendation: never cancel an active deployment mid-flight
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout release tag
+      - name: Checkout release
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -37,12 +39,19 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Build for GitHub Pages
-        run: npx vite build --base="${{ steps.pages.outputs.base_path }}/"
+        env:
+          RAW_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: |
+          BASE_PATH="${RAW_BASE_PATH%/}/"
+          echo "Building with Vite base: ${BASE_PATH}"
+          npx vite build --base="${BASE_PATH}"
+          touch dist/.nojekyll
+          cp dist/index.html dist/404.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: ./dist
 
   deploy:
     environment:
