@@ -11,7 +11,7 @@ Every ruleset in gridbound is a pure JSON file (`schemaVersion: 2`). Cell behavi
 > **Alpha Notice (`v0.1.0-alpha`):** Core simulation engine, Schema v2 JSON format, Visual Ruleset Studio, and the built-in `Classic Colony` ruleset are live and playable. Expect breaking schema refinements before `v1.0.0`.
 
 <!-- Replace the URL below once you publish a live demo (GitHub Pages / Cloud Run / AI Studio) -->
-**Live Demo:** [Play gridbound in your browser](https://https://iaqkrie.github.io/gridbound/)
+**Live Demo:** [Play gridbound in your browser](https://iaqkrie.github.io/gridbound/)
 
 ---
 
