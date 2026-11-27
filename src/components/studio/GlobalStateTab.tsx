@@ -9,6 +9,7 @@ import {
 } from '../../engine/sdk';
 import { NodeGraphEditor } from './NodeGraphEditor';
 import { makeUniqueId } from './studioUtils';
+import { NumberInput } from './NumberInput';
 
 interface GlobalStateTabProps {
   manifest: RulesetManifest;
@@ -231,15 +232,11 @@ export function GlobalStateTab({
                           <option value="false">false</option>
                         </select>
                       ) : v.type === 'number' ? (
-                        <input
-                          type="number"
-                          step="any"
+                        <NumberInput
                           disabled={readOnly}
                           value={Number(v.initialValue)}
-                          onChange={(e) =>
-                            updateVariable(idx, {
-                              initialValue: Number(e.target.value),
-                            })
+                          onChange={(initialValue) =>
+                            updateVariable(idx, { initialValue })
                           }
                           className={`${INPUT_CLASS} font-mono tabular-nums`}
                         />
@@ -325,14 +322,12 @@ export function GlobalStateTab({
                       {v.hasCap && (
                         <div className="inline-flex items-center gap-1.5">
                           <span className="text-[#8B98A9]">Initial Cap:</span>
-                          <input
-                            type="number"
+                          <NumberInput
+                            min={0}
                             disabled={readOnly}
                             value={v.initialMax ?? 100}
-                            onChange={(e) =>
-                              updateVariable(idx, {
-                                initialMax: Math.max(0, Number(e.target.value)),
-                              })
+                            onChange={(initialMax) =>
+                              updateVariable(idx, { initialMax })
                             }
                             className="w-20 bg-[#0B0F14] border border-[#1F2A38] rounded px-2 py-1 text-xs font-mono text-[#E6EDF3]"
                           />

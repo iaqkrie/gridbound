@@ -1,10 +1,10 @@
 // ============================================================================
-// Gridbound SDK — Core Schema v4 (0.1.0-alpha.1)
+// Gridbound SDK — Core Schema v4 (0.1.0-alpha.2)
 // Node-Native Engine Core, GlobalState Access Control, Unified Numeric Supplies,
 // 32×32 PNG Sprite Registry, Layer/Mask World Generator & Universal Interfaces
 // ============================================================================
 
-export const APP_VERSION = '0.1.0-alpha.1';
+export const APP_VERSION = '0.1.0-alpha.2';
 export const CURRENT_SCHEMA_VERSION = 4 as const;
 
 export type CellTypeId = string;

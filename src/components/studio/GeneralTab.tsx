@@ -4,6 +4,7 @@ import {
   SetupOptionManifest,
 } from '../../engine/sdk';
 import { makeUniqueId } from './studioUtils';
+import { NumberInput } from './NumberInput';
 
 interface GeneralTabProps {
   manifest: RulesetManifest;
@@ -135,16 +136,16 @@ export function GeneralTab({ manifest, readOnly, onChange }: GeneralTabProps) {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={LABEL_CLASS}>Default Width</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={4}
                   max={64}
+                  integer
                   disabled={readOnly}
                   value={manifest.defaultGridSize.width}
-                  onChange={(e) =>
+                  onChange={(width) =>
                     updateField('defaultGridSize', {
                       ...manifest.defaultGridSize,
-                      width: Math.max(4, Math.min(64, Number(e.target.value))),
+                      width,
                     })
                   }
                   className={`${INPUT_CLASS} font-mono tabular-nums`}
@@ -152,16 +153,16 @@ export function GeneralTab({ manifest, readOnly, onChange }: GeneralTabProps) {
               </div>
               <div>
                 <label className={LABEL_CLASS}>Default Height</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={4}
                   max={64}
+                  integer
                   disabled={readOnly}
                   value={manifest.defaultGridSize.height}
-                  onChange={(e) =>
+                  onChange={(height) =>
                     updateField('defaultGridSize', {
                       ...manifest.defaultGridSize,
-                      height: Math.max(4, Math.min(64, Number(e.target.value))),
+                      height,
                     })
                   }
                   className={`${INPUT_CLASS} font-mono tabular-nums`}
@@ -328,15 +329,11 @@ export function GeneralTab({ manifest, readOnly, onChange }: GeneralTabProps) {
                             <option value="false">false</option>
                           </select>
                         ) : opt.type === 'number' ? (
-                          <input
-                            type="number"
-                            step="any"
+                          <NumberInput
                             disabled={readOnly}
                             value={Number(opt.defaultValue)}
-                            onChange={(e) =>
-                              updateSetupOption(idx, {
-                                defaultValue: Number(e.target.value),
-                              })
+                            onChange={(defaultValue) =>
+                              updateSetupOption(idx, { defaultValue })
                             }
                             className={`${INPUT_CLASS} font-mono`}
                           />
@@ -371,42 +368,29 @@ export function GeneralTab({ manifest, readOnly, onChange }: GeneralTabProps) {
                     <div className="grid grid-cols-3 gap-3">
                       <div>
                         <label className={LABEL_CLASS}>Min</label>
-                        <input
-                          type="number"
-                          step="any"
+                        <NumberInput
                           disabled={readOnly}
                           value={opt.min ?? 0}
-                          onChange={(e) =>
-                            updateSetupOption(idx, { min: Number(e.target.value) })
-                          }
+                          onChange={(min) => updateSetupOption(idx, { min })}
                           className={`${INPUT_CLASS} font-mono`}
                         />
                       </div>
                       <div>
                         <label className={LABEL_CLASS}>Max</label>
-                        <input
-                          type="number"
-                          step="any"
+                        <NumberInput
                           disabled={readOnly}
                           value={opt.max ?? 10}
-                          onChange={(e) =>
-                            updateSetupOption(idx, { max: Number(e.target.value) })
-                          }
+                          onChange={(max) => updateSetupOption(idx, { max })}
                           className={`${INPUT_CLASS} font-mono`}
                         />
                       </div>
                       <div>
                         <label className={LABEL_CLASS}>Step</label>
-                        <input
-                          type="number"
-                          step="any"
+                        <NumberInput
+                          min={0.0001}
                           disabled={readOnly}
                           value={opt.step ?? 1}
-                          onChange={(e) =>
-                            updateSetupOption(idx, {
-                              step: Number(e.target.value),
-                            })
-                          }
+                          onChange={(step) => updateSetupOption(idx, { step })}
                           className={`${INPUT_CLASS} font-mono`}
                         />
                       </div>

@@ -10,6 +10,7 @@ import {
   RulesetManifest,
   StateFieldManifest,
 } from '../../engine/sdk';
+import { NumberInput } from './NumberInput';
 
 interface NodeInspectorProps {
   node: GraphNode | null;
@@ -152,11 +153,10 @@ export function NodeInspector({
                   <option value="false">false</option>
                 </select>
               ) : valType === 'number' ? (
-                <input
-                  type="number"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(curVal)}
-                  onChange={(e) => setField('value', Number(e.target.value))}
+                  onChange={(v) => setField('value', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               ) : (
@@ -234,23 +234,19 @@ export function NodeInspector({
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className={LABEL_CLASS}>Default A</label>
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(data.a ?? 0)}
-                  onChange={(e) => setField('a', Number(e.target.value))}
+                  onChange={(v) => setField('a', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <div>
                 <label className={LABEL_CLASS}>Default B</label>
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(data.b ?? 0)}
-                  onChange={(e) => setField('b', Number(e.target.value))}
+                  onChange={(v) => setField('b', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -263,23 +259,19 @@ export function NodeInspector({
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className={LABEL_CLASS}>Min</label>
-              <input
-                type="number"
-                step="any"
+              <NumberInput
                 disabled={readOnly}
                 value={Number(data.min ?? 0)}
-                onChange={(e) => setField('min', Number(e.target.value))}
+                onChange={(v) => setField('min', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
             <div>
               <label className={LABEL_CLASS}>Max</label>
-              <input
-                type="number"
-                step="any"
+              <NumberInput
                 disabled={readOnly}
                 value={Number(data.max ?? 100)}
-                onChange={(e) => setField('max', Number(e.target.value))}
+                onChange={(v) => setField('max', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
@@ -355,12 +347,10 @@ export function NodeInspector({
                   <option value="false">false</option>
                 </select>
               ) : bType === 'number' ? (
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(bVal)}
-                  onChange={(e) => setField('b', Number(e.target.value))}
+                  onChange={(v) => setField('b', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               ) : (
@@ -398,14 +388,13 @@ export function NodeInspector({
         return (
           <div>
             <label className={LABEL_CLASS}>Probability (0 – 1)</label>
-            <input
-              type="number"
+            <NumberInput
               min={0}
               max={1}
               step={0.05}
               disabled={readOnly}
               value={Number(data.probability ?? 0.5)}
-              onChange={(e) => setField('probability', Number(e.target.value))}
+              onChange={(v) => setField('probability', v)}
               className={`${INPUT_CLASS} font-mono`}
             />
           </div>
@@ -509,12 +498,10 @@ export function NodeInspector({
             {(node.type === 'global.add' || node.type === 'global.consume') && (
               <div>
                 <label className={LABEL_CLASS}>Default Amount</label>
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(data.amount ?? 1)}
-                  onChange={(e) => setField('amount', Number(e.target.value))}
+                  onChange={(v) => setField('amount', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -522,12 +509,10 @@ export function NodeInspector({
             {node.type === 'global.addCap' && (
               <div>
                 <label className={LABEL_CLASS}>Cap Delta</label>
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(data.delta ?? 1)}
-                  onChange={(e) => setField('delta', Number(e.target.value))}
+                  onChange={(v) => setField('delta', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -593,12 +578,10 @@ export function NodeInspector({
             {node.type === 'cell.addState' && (
               <div>
                 <label className={LABEL_CLASS}>Default Amount</label>
-                <input
-                  type="number"
-                  step="any"
+                <NumberInput
                   disabled={readOnly}
                   value={Number(data.amount ?? 1)}
-                  onChange={(e) => setField('amount', Number(e.target.value))}
+                  onChange={(v) => setField('amount', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -607,12 +590,10 @@ export function NodeInspector({
               <div>
                 <label className={LABEL_CLASS}>Default Value</label>
                 {matchedField?.type === 'number' ? (
-                  <input
-                    type="number"
-                    step="any"
+                  <NumberInput
                     disabled={readOnly}
                     value={Number(data.value ?? 0)}
-                    onChange={(e) => setField('value', Number(e.target.value))}
+                    onChange={(v) => setField('value', v)}
                     className={`${INPUT_CLASS} font-mono`}
                   />
                 ) : matchedField?.type === 'boolean' ? (
@@ -714,14 +695,13 @@ export function NodeInspector({
         return (
           <div>
             <label className={LABEL_CLASS}>Opacity (0 – 1)</label>
-            <input
-              type="number"
+            <NumberInput
               min={0}
               max={1}
               step={0.1}
               disabled={readOnly}
               value={Number(data.opacity ?? 1)}
-              onChange={(e) => setField('opacity', Number(e.target.value))}
+              onChange={(v) => setField('opacity', v)}
               className={`${INPUT_CLASS} font-mono`}
             />
           </div>
@@ -785,12 +765,11 @@ export function NodeInspector({
             {node.type !== 'supply.get' && (
               <div>
                 <label className={LABEL_CLASS}>Default Amount</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={0}
                   disabled={readOnly}
                   value={Number(data.amount ?? 1)}
-                  onChange={(e) => setField('amount', Number(e.target.value))}
+                  onChange={(v) => setField('amount', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -826,17 +805,14 @@ export function NodeInspector({
                   <div className="space-y-2">
                     <div>
                       <label className={LABEL_CLASS}>Radius</label>
-                      <input
-                        type="number"
+                      <NumberInput
                         min={0}
                         max={20}
+                        integer
                         disabled={readOnly}
                         value={area.radius}
-                        onChange={(e) =>
-                          setField('area', {
-                            ...area,
-                            radius: Math.max(0, Number(e.target.value)),
-                          })
+                        onChange={(radius) =>
+                          setField('area', { ...area, radius })
                         }
                         className={`${INPUT_CLASS} font-mono`}
                       />
@@ -857,25 +833,21 @@ export function NodeInspector({
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className={LABEL_CLASS}>dx</label>
-                      <input
-                        type="number"
+                      <NumberInput
+                        integer
                         disabled={readOnly}
                         value={area.dx}
-                        onChange={(e) =>
-                          setField('area', { ...area, dx: Number(e.target.value) })
-                        }
+                        onChange={(dx) => setField('area', { ...area, dx })}
                         className={`${INPUT_CLASS} font-mono`}
                       />
                     </div>
                     <div>
                       <label className={LABEL_CLASS}>dy</label>
-                      <input
-                        type="number"
+                      <NumberInput
+                        integer
                         disabled={readOnly}
                         value={area.dy}
-                        onChange={(e) =>
-                          setField('area', { ...area, dy: Number(e.target.value) })
-                        }
+                        onChange={(dy) => setField('area', { ...area, dy })}
                         className={`${INPUT_CLASS} font-mono`}
                       />
                     </div>
@@ -885,25 +857,21 @@ export function NodeInspector({
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className={LABEL_CLASS}>X</label>
-                      <input
-                        type="number"
+                      <NumberInput
+                        integer
                         disabled={readOnly}
                         value={area.x}
-                        onChange={(e) =>
-                          setField('area', { ...area, x: Number(e.target.value) })
-                        }
+                        onChange={(x) => setField('area', { ...area, x })}
                         className={`${INPUT_CLASS} font-mono`}
                       />
                     </div>
                     <div>
                       <label className={LABEL_CLASS}>Y</label>
-                      <input
-                        type="number"
+                      <NumberInput
+                        integer
                         disabled={readOnly}
                         value={area.y}
-                        onChange={(e) =>
-                          setField('area', { ...area, y: Number(e.target.value) })
-                        }
+                        onChange={(y) => setField('area', { ...area, y })}
                         className={`${INPUT_CLASS} font-mono`}
                       />
                     </div>
@@ -930,12 +898,12 @@ export function NodeInspector({
             </div>
             <div>
               <label className={LABEL_CLASS}>Amount</label>
-              <input
-                type="number"
+              <NumberInput
                 min={1}
+                integer
                 disabled={readOnly}
                 value={Number(data.amount ?? 1)}
-                onChange={(e) => setField('amount', Number(e.target.value))}
+                onChange={(v) => setField('amount', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
@@ -1249,12 +1217,10 @@ export function NodeInspector({
         return (
           <div>
             <label className={LABEL_CLASS}>Number</label>
-            <input
-              type="number"
-              step="any"
+            <NumberInput
               disabled={readOnly}
               value={Number(data.value ?? 0)}
-              onChange={(e) => setField('value', Number(e.target.value))}
+              onChange={(v) => setField('value', v)}
               className={`${INPUT_CLASS} font-mono`}
             />
           </div>
@@ -1265,36 +1231,35 @@ export function NodeInspector({
           <div className="space-y-3">
             <div>
               <label className={LABEL_CLASS}>Scale</label>
-              <input
-                type="number"
+              <NumberInput
                 min={0.5}
                 step={0.5}
                 disabled={readOnly}
                 value={Number(data.scale ?? 6)}
-                onChange={(e) => setField('scale', Number(e.target.value))}
+                onChange={(v) => setField('scale', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className={LABEL_CLASS}>Octaves</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={1}
                   max={5}
+                  integer
                   disabled={readOnly}
                   value={Number(data.octaves ?? 2)}
-                  onChange={(e) => setField('octaves', Number(e.target.value))}
+                  onChange={(v) => setField('octaves', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <div>
                 <label className={LABEL_CLASS}>Seed Offset</label>
-                <input
-                  type="number"
+                <NumberInput
+                  integer
                   disabled={readOnly}
                   value={Number(data.seedOffset ?? 0)}
-                  onChange={(e) => setField('seedOffset', Number(e.target.value))}
+                  onChange={(v) => setField('seedOffset', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -1307,42 +1272,35 @@ export function NodeInspector({
           <div className="space-y-3">
             <div>
               <label className={LABEL_CLASS}>Target Coverage (0 – 1)</label>
-              <input
-                type="number"
+              <NumberInput
                 min={0}
                 max={1}
                 step={0.02}
                 disabled={readOnly}
                 value={Number(data.targetCoverage ?? 0.12)}
-                onChange={(e) =>
-                  setField('targetCoverage', Number(e.target.value))
-                }
+                onChange={(v) => setField('targetCoverage', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className={LABEL_CLASS}>Cluster Size</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={1}
+                  integer
                   disabled={readOnly}
                   value={Number(data.clusterSize ?? 5)}
-                  onChange={(e) =>
-                    setField('clusterSize', Number(e.target.value))
-                  }
+                  onChange={(v) => setField('clusterSize', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
               <div>
                 <label className={LABEL_CLASS}>Seed Offset</label>
-                <input
-                  type="number"
+                <NumberInput
+                  integer
                   disabled={readOnly}
                   value={Number(data.seedOffset ?? 0)}
-                  onChange={(e) =>
-                    setField('seedOffset', Number(e.target.value))
-                  }
+                  onChange={(v) => setField('seedOffset', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>
@@ -1355,24 +1313,23 @@ export function NodeInspector({
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className={LABEL_CLASS}>Density (0 – 1)</label>
-              <input
-                type="number"
+              <NumberInput
                 min={0}
                 max={1}
                 step={0.02}
                 disabled={readOnly}
                 value={Number(data.density ?? 0.1)}
-                onChange={(e) => setField('density', Number(e.target.value))}
+                onChange={(v) => setField('density', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
             <div>
               <label className={LABEL_CLASS}>Seed Offset</label>
-              <input
-                type="number"
+              <NumberInput
+                integer
                 disabled={readOnly}
                 value={Number(data.seedOffset ?? 0)}
-                onChange={(e) => setField('seedOffset', Number(e.target.value))}
+                onChange={(v) => setField('seedOffset', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
@@ -1383,13 +1340,13 @@ export function NodeInspector({
         return (
           <div>
             <label className={LABEL_CLASS}>Max Distance (tiles)</label>
-            <input
-              type="number"
+            <NumberInput
               min={1}
               max={32}
+              integer
               disabled={readOnly}
               value={Number(data.maxDistance ?? 5)}
-              onChange={(e) => setField('maxDistance', Number(e.target.value))}
+              onChange={(v) => setField('maxDistance', v)}
               className={`${INPUT_CLASS} font-mono`}
             />
           </div>
@@ -1400,27 +1357,25 @@ export function NodeInspector({
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className={LABEL_CLASS}>Min</label>
-              <input
-                type="number"
+              <NumberInput
                 step={0.05}
                 min={0}
                 max={1}
                 disabled={readOnly}
                 value={Number(data.min ?? 0.5)}
-                onChange={(e) => setField('min', Number(e.target.value))}
+                onChange={(v) => setField('min', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
             <div>
               <label className={LABEL_CLASS}>Max</label>
-              <input
-                type="number"
+              <NumberInput
                 step={0.05}
                 min={0}
                 max={1}
                 disabled={readOnly}
                 value={Number(data.max ?? 1)}
-                onChange={(e) => setField('max', Number(e.target.value))}
+                onChange={(v) => setField('max', v)}
                 className={`${INPUT_CLASS} font-mono`}
               />
             </div>
@@ -1469,14 +1424,13 @@ export function NodeInspector({
             {node.type === 'gen.paintLayer' && (
               <div>
                 <label className={LABEL_CLASS}>Mask Threshold (0 – 1)</label>
-                <input
-                  type="number"
+                <NumberInput
                   min={0}
                   max={1}
                   step={0.05}
                   disabled={readOnly}
                   value={Number(data.threshold ?? 0.5)}
-                  onChange={(e) => setField('threshold', Number(e.target.value))}
+                  onChange={(v) => setField('threshold', v)}
                   className={`${INPUT_CLASS} font-mono`}
                 />
               </div>

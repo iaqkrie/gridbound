@@ -1,6 +1,6 @@
 # gridbound
 
-![Version](https://img.shields.io/badge/version-0.1.0--alpha.1-10B981?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-10B981?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9?style=flat-square)
 ![Stack](https://img.shields.io/badge/stack-React%2019%20%C2%B7%20TypeScript%20%C2%B7%20Vite-1F2A38?style=flat-square)
 
@@ -8,7 +8,7 @@
 
 Every ruleset in gridbound is a self-contained manifest (`schemaVersion: 4`). Cell behaviors, world-level logic, custom UI popovers & hover cards, 32×32 pixel-art sprites, and procedural layer/mask map generators are authored visually in **Ruleset Studio** and executed by a deterministic load-time compiled graph VM — with zero TypeScript code required.
 
-> **Alpha Notice (`v0.1.0-alpha.1`):** Node-native Schema v4 engine, Visual Ruleset Studio, 32×32 pixel-art editor, live world generator preview, and the rebuilt `Classic Colony` ruleset are live and playable. Expect schema refinements before `v1.0.0`.
+> **Alpha Notice (`v0.1.0-alpha.2`):** Node-native Schema v4 engine, Visual Ruleset Studio, 32×32 pixel-art editor, live world generator preview, and the rebuilt `Classic Colony` ruleset are live and playable. Expect schema refinements before `v1.0.0`.
 
 **Live Demo:** [Play gridbound in your browser](https://iaqkrie.github.io/gridbound/)
 
@@ -19,7 +19,7 @@ Every ruleset in gridbound is a self-contained manifest (`schemaVersion: 4`). Ce
 ### Visual Ruleset Studio
 Create complete turn-based grid games directly in the browser:
 - **Start Anywhere:** create a new ruleset from scratch, edit custom rulesets, or open any built-in ruleset (including `Classic Colony`) in read-only mode and click **Duplicate as Custom**.
-- **Unified Node Graph Editor:** wire typed color-coded ports (`exec`, `number`, `boolean`, `string`, `any`, `mask`, `layer`) across **Cell Behavior**, **Global World Logic**, **Interface Actions**, and **World Generation**, complete with pan/zoom, right-click searchable node palette, Auto Layout, Fit View, and a contextual Node Inspector.
+- **Unified Node Graph Editor:** wire typed color-coded ports (`exec`, `number`, `boolean`, `string`, `any`, `mask`, `layer`) across **Cell Behavior**, **Global World Logic**, **Interface Actions**, and **World Generation**, complete with pan/zoom, right-click-at-cursor searchable node palette, drag-wire-to-create compatible auto-wired nodes, Auto Layout, Fit View, and a contextual Node Inspector.
 - **Sprites (`32×32 PNG`) + Built-in Pixel Editor:** upload PNG images (auto-resized nearest-neighbor to 32×32) or paint directly in the integrated 32×32 pixel-art editor with pencil, eraser, flood-fill, eyedropper, palette, undo/redo, flip, grid toggle, and live scale preview.
 - **GlobalState & Access Control:** configure `public`, `readonly`, and `private` global variables, optional dynamic caps (`global.addCap`), a customizable HUD bar with live TopBar preview, and world-level `On Start` / `On Cycle` logic.
 - **WorldGenerator + Live Map Preview:** compose procedural terrain from 2D masks (`gen.noise`, `gen.clusters`, `gen.scatter`, `gen.proximity`, `gen.maskMath`, `gen.threshold`) and cell layers (`gen.fillLayer`, `gen.paintLayer`, `gen.mergeLayers`) while inspecting a live sprite-rendered map preview with seed rolling, grid size presets, setup options, and tile distribution.

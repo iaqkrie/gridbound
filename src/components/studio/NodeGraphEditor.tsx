@@ -14,6 +14,7 @@ import {
   GraphNode,
   GraphScope,
   NodeCategory,
+  NodeDefinition,
   NodeGraph,
   PortDef,
   PortType,
@@ -36,6 +37,8 @@ const NODE_WIDTH = 204;
 const HEADER_H = 30;
 const PORT_ROW_H = 24;
 const BODY_PAD_TOP = 8;
+const PALETTE_W = 272;
+const PALETTE_MAX_H = 360;
 
 const PORT_COLOR: Record<PortType, string> = {
   exec: '#E6EDF3',
@@ -62,6 +65,41 @@ const CATEGORY_ACCENT: Record<NodeCategory, string> = {
   ui: '#EC4899',
   generator: '#2DD4BF',
 };
+
+interface DraggingWireState {
+  side: 'out' | 'in';
+  nodeId: string;
+  portId: string;
+  portType: PortType;
+  portLabel: string;
+  nodeLabel: string;
+  startX: number;
+  startY: number;
+  curX: number;
+  curY: number;
+  startClientX: number;
+  startClientY: number;
+  moved: boolean;
+}
+
+interface PendingWireConnect {
+  side: 'out' | 'in';
+  nodeId: string;
+  portId: string;
+  portType: PortType;
+  portLabel: string;
+  nodeLabel: string;
+  anchorX: number;
+  anchorY: number;
+}
+
+interface PaletteState {
+  screenX: number;
+  screenY: number;
+  graphX: number;
+  graphY: number;
+  pendingWire?: PendingWireConnect;
+}
 
 function getEffectiveOutputs(node: GraphNode): PortDef[] {
   const def = getNodeDefinition(node.type);
@@ -96,6 +134,39 @@ function arePortsCompatible(fromType: PortType, toType: PortType): boolean {
   }
   if (fromType === 'any' || toType === 'any') return true;
   return fromType === toType;
+}
+
+function findBestCompatiblePort(
+  def: NodeDefinition,
+  pending: PendingWireConnect
+): { port: PortDef; index: number } | null {
+  if (pending.side === 'out') {
+    // Dragged from an output pin -> find compatible input on candidate node
+    const exactIdx = def.inputs.findIndex((p) => p.type === pending.portType);
+    if (exactIdx !== -1) {
+      return { port: def.inputs[exactIdx], index: exactIdx };
+    }
+    const compatIdx = def.inputs.findIndex((p) =>
+      arePortsCompatible(pending.portType, p.type)
+    );
+    if (compatIdx !== -1) {
+      return { port: def.inputs[compatIdx], index: compatIdx };
+    }
+    return null;
+  } else {
+    // Dragged from an input pin -> find compatible output on candidate node
+    const exactIdx = def.outputs.findIndex((p) => p.type === pending.portType);
+    if (exactIdx !== -1) {
+      return { port: def.outputs[exactIdx], index: exactIdx };
+    }
+    const compatIdx = def.outputs.findIndex((p) =>
+      arePortsCompatible(p.type, pending.portType)
+    );
+    if (compatIdx !== -1) {
+      return { port: def.outputs[compatIdx], index: compatIdx };
+    }
+    return null;
+  }
 }
 
 function getPortPosition(
@@ -141,14 +212,20 @@ function summarizeNode(node: GraphNode): string {
       return [
         d.varId ? String(d.varId) : 'wired',
         d.amount !== undefined ? `${d.amount}` : '',
-        d.delta !== undefined ? `${Number(d.delta) >= 0 ? '+' : ''}${d.delta}` : '',
+        d.delta !== undefined
+          ? `${Number(d.delta) >= 0 ? '+' : ''}${d.delta}`
+          : '',
       ]
         .filter(Boolean)
         .join(' · ');
     case 'cell.getState':
     case 'cell.setState':
     case 'cell.addState':
-      return [d.key, d.value !== undefined ? `= ${d.value}` : '', d.amount !== undefined ? `+${d.amount}` : '']
+      return [
+        d.key,
+        d.value !== undefined ? `= ${d.value}` : '',
+        d.amount !== undefined ? `+${d.amount}` : '',
+      ]
         .filter(Boolean)
         .join(' ');
     case 'cell.setSprite':
@@ -192,22 +269,11 @@ export function NodeGraphEditor({
   const viewportRef = useRef<HTMLDivElement>(null);
   const [camera, setCamera] = useState({ x: 32, y: 32, zoom: 0.92 });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [palettePos, setPalettePos] = useState<{ x: number; y: number } | null>(
+  const [palette, setPalette] = useState<PaletteState | null>(null);
+  const [paletteSearch, setPaletteSearch] = useState('');
+  const [draggingWire, setDraggingWire] = useState<DraggingWireState | null>(
     null
   );
-  const [paletteSearch, setPaletteSearch] = useState('');
-
-  // Wire dragging state
-  const [draggingWire, setDraggingWire] = useState<{
-    fromNode: string;
-    fromPort: string;
-    fromType: PortType;
-    startX: number;
-    startY: number;
-    curX: number;
-    curY: number;
-  } | null>(null);
 
   // Pan & node drag refs
   const panRef = useRef<{
@@ -230,22 +296,26 @@ export function NodeGraphEditor({
 
   const filteredPalette = useMemo(() => {
     const q = paletteSearch.trim().toLowerCase();
-    const list = q
-      ? scopeNodes.filter(
-          (n) =>
-            n.label.toLowerCase().includes(q) ||
-            n.type.toLowerCase().includes(q) ||
-            n.category.toLowerCase().includes(q)
-        )
-      : scopeNodes;
-    const grouped = new Map<NodeCategory, typeof list>();
+    const pending = palette?.pendingWire;
+    const list = scopeNodes.filter((n) => {
+      if (pending && !findBestCompatiblePort(n, pending)) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        n.label.toLowerCase().includes(q) ||
+        n.type.toLowerCase().includes(q) ||
+        n.category.toLowerCase().includes(q)
+      );
+    });
+    const grouped = new Map<NodeCategory, NodeDefinition[]>();
     for (const def of list) {
       const arr = grouped.get(def.category) ?? [];
       arr.push(def);
       grouped.set(def.category, arr);
     }
     return Array.from(grouped.entries());
-  }, [scopeNodes, paletteSearch]);
+  }, [scopeNodes, paletteSearch, palette?.pendingWire]);
 
   const nodeMap = useMemo(() => {
     const map = new Map<string, GraphNode>();
@@ -253,7 +323,9 @@ export function NodeGraphEditor({
     return map;
   }, [graph.nodes]);
 
-  const selectedNode = selectedNodeId ? (nodeMap.get(selectedNodeId) ?? null) : null;
+  const selectedNode = selectedNodeId
+    ? (nodeMap.get(selectedNodeId) ?? null)
+    : null;
 
   const clientToGraph = useCallback(
     (clientX: number, clientY: number) => {
@@ -265,6 +337,39 @@ export function NodeGraphEditor({
       };
     },
     [camera]
+  );
+
+  const clampPalettePosition = useCallback(
+    (rawX: number, rawY: number) => {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect) return { screenX: Math.max(12, rawX), screenY: Math.max(12, rawY) };
+      const maxX = Math.max(12, rect.width - PALETTE_W - 12);
+      const maxY = Math.max(12, rect.height - Math.min(PALETTE_MAX_H, rect.height * 0.75) - 12);
+      return {
+        screenX: Math.round(Math.max(12, Math.min(maxX, rawX))),
+        screenY: Math.round(Math.max(12, Math.min(maxY, rawY))),
+      };
+    },
+    []
+  );
+
+  const openPaletteAtClient = useCallback(
+    (clientX: number, clientY: number, pendingWire?: PendingWireConnect) => {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      const localX = rect ? clientX - rect.left : 12;
+      const localY = rect ? clientY - rect.top : 12;
+      const { screenX, screenY } = clampPalettePosition(localX, localY);
+      const graphPt = clientToGraph(clientX, clientY);
+      setPaletteSearch('');
+      setPalette({
+        screenX,
+        screenY,
+        graphX: graphPt.x,
+        graphY: graphPt.y,
+        pendingWire,
+      });
+    },
+    [clampPalettePosition, clientToGraph]
   );
 
   const fitView = useCallback(() => {
@@ -297,17 +402,68 @@ export function NodeGraphEditor({
     });
   }, [graph.nodes]);
 
-  // Fit view when switching to another graph object (e.g. different cell)
-  const lastNodeCountRef = useRef<string>('');
+  // Clear invalid selection when switching graphs
+  const lastGraphIdentityRef = useRef<string>('');
   const graphIdentity = `${scope}:${graph.nodes[0]?.id ?? 'empty'}:${graph.nodes.length}`;
   useEffect(() => {
-    if (lastNodeCountRef.current !== graphIdentity) {
-      lastNodeCountRef.current = graphIdentity;
+    if (lastGraphIdentityRef.current !== graphIdentity) {
+      lastGraphIdentityRef.current = graphIdentity;
       if (selectedNodeId && !nodeMap.has(selectedNodeId)) {
         setSelectedNodeId(null);
       }
     }
   }, [graphIdentity, nodeMap, selectedNodeId]);
+
+  const buildConnectedEdges = useCallback(
+    (
+      baseEdges: GraphEdge[],
+      fromNode: string,
+      fromPort: string,
+      fromType: PortType,
+      toNode: string,
+      toPort: string,
+      toType: PortType
+    ): GraphEdge[] => {
+      const filtered = baseEdges.filter((e) => {
+        if (
+          e.fromNode === fromNode &&
+          e.fromPort === fromPort &&
+          e.toNode === toNode &&
+          e.toPort === toPort
+        ) {
+          return false;
+        }
+        // Data inputs accept a single incoming wire
+        if (toType !== 'exec' && e.toNode === toNode && e.toPort === toPort) {
+          return false;
+        }
+        // Exec outputs accept a single outgoing wire
+        if (
+          fromType === 'exec' &&
+          e.fromNode === fromNode &&
+          e.fromPort === fromPort
+        ) {
+          return false;
+        }
+        return true;
+      });
+      const edgeId = makeUniqueId(
+        'edge',
+        filtered.map((e) => e.id)
+      );
+      return [
+        ...filtered,
+        {
+          id: edgeId,
+          fromNode,
+          fromPort,
+          toNode,
+          toPort,
+        },
+      ];
+    },
+    []
+  );
 
   const handleAddNode = (nodeType: string) => {
     if (readOnly) return;
@@ -317,22 +473,68 @@ export function NodeGraphEditor({
       nodeType.replace('.', '_'),
       graph.nodes.map((n) => n.id)
     );
-    const pos = palettePos ?? {
-      x: Math.round((240 - camera.x) / camera.zoom),
-      y: Math.round((160 - camera.y) / camera.zoom),
-    };
+
+    const pending = palette?.pendingWire;
+    const match = pending ? findBestCompatiblePort(def, pending) : null;
+
+    let spawnX = palette
+      ? palette.graphX
+      : Math.round((240 - camera.x) / camera.zoom);
+    let spawnY = palette
+      ? palette.graphY
+      : Math.round((160 - camera.y) / camera.zoom);
+
+    if (pending && match) {
+      // Align the auto-connected pin directly onto the drop point
+      const pinOffsetY =
+        HEADER_H + BODY_PAD_TOP + match.index * PORT_ROW_H + PORT_ROW_H / 2;
+      spawnY = palette!.graphY - pinOffsetY;
+      if (pending.side === 'in') {
+        spawnX = palette!.graphX - NODE_WIDTH;
+      }
+    }
+
     const nextNode: GraphNode = {
       id: newId,
       type: nodeType,
       data: def.defaultData ? JSON.parse(JSON.stringify(def.defaultData)) : {},
-      position: { x: Math.round(pos.x), y: Math.round(pos.y) },
+      position: {
+        x: Math.round(spawnX / 8) * 8,
+        y: Math.round(spawnY / 8) * 8,
+      },
     };
+
+    let nextEdges = graph.edges;
+    if (pending && match) {
+      if (pending.side === 'out') {
+        nextEdges = buildConnectedEdges(
+          graph.edges,
+          pending.nodeId,
+          pending.portId,
+          pending.portType,
+          newId,
+          match.port.id,
+          match.port.type
+        );
+      } else {
+        nextEdges = buildConnectedEdges(
+          graph.edges,
+          newId,
+          match.port.id,
+          match.port.type,
+          pending.nodeId,
+          pending.portId,
+          pending.portType
+        );
+      }
+    }
+
     onChange({
-      ...graph,
       nodes: [...graph.nodes, nextNode],
+      edges: nextEdges,
     });
     setSelectedNodeId(newId);
-    setPaletteOpen(false);
+    setPalette(null);
     setPaletteSearch('');
   };
 
@@ -395,9 +597,14 @@ export function NodeGraphEditor({
     });
   };
 
-  // Keyboard shortcuts (Delete, Ctrl+D)
+  // Keyboard shortcuts (Escape closes palette, Delete / Ctrl+D for selected node)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && palette) {
+        e.preventDefault();
+        setPalette(null);
+        return;
+      }
       if (readOnly || !selectedNodeId) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -411,13 +618,17 @@ export function NodeGraphEditor({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [readOnly, selectedNodeId, handleDeleteNode, handleDuplicateNode]);
+  }, [readOnly, selectedNodeId, palette, handleDeleteNode, handleDuplicateNode]);
 
   // Wheel zoom
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-graph-overlay="true"]')) {
+        return;
+      }
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const mx = e.clientX - rect.left;
@@ -441,7 +652,7 @@ export function NodeGraphEditor({
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button === 2) return;
     setSelectedNodeId(null);
-    setPaletteOpen(false);
+    setPalette(null);
     panRef.current = {
       active: true,
       startX: e.clientX,
@@ -480,11 +691,42 @@ export function NodeGraphEditor({
 
     if (draggingWire) {
       const pt = clientToGraph(e.clientX, e.clientY);
-      setDraggingWire((prev) => (prev ? { ...prev, curX: pt.x, curY: pt.y } : null));
+      const dist = Math.hypot(
+        e.clientX - draggingWire.startClientX,
+        e.clientY - draggingWire.startClientY
+      );
+      setDraggingWire((prev) =>
+        prev
+          ? { ...prev, curX: pt.x, curY: pt.y, moved: prev.moved || dist > 6 }
+          : null
+      );
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    panRef.current.active = false;
+    nodeDragRef.current = null;
+    if (draggingWire) {
+      const wire = draggingWire;
+      setDraggingWire(null);
+
+      // Dropped onto empty canvas after dragging -> open context-filtered Add Node menu right here!
+      if (!readOnly && wire.moved) {
+        openPaletteAtClient(e.clientX, e.clientY, {
+          side: wire.side,
+          nodeId: wire.nodeId,
+          portId: wire.portId,
+          portType: wire.portType,
+          portLabel: wire.portLabel,
+          nodeLabel: wire.nodeLabel,
+          anchorX: wire.startX,
+          anchorY: wire.startY,
+        });
+      }
+    }
+  };
+
+  const handlePointerLeave = () => {
     panRef.current.active = false;
     nodeDragRef.current = null;
     if (draggingWire) {
@@ -498,53 +740,95 @@ export function NodeGraphEditor({
     toType: PortType
   ) => {
     if (readOnly || !draggingWire) return;
-    if (draggingWire.fromNode === toNode) {
-      setDraggingWire(null);
-      return;
-    }
-    if (!arePortsCompatible(draggingWire.fromType, toType)) {
-      setDraggingWire(null);
+    const wire = draggingWire;
+    setDraggingWire(null);
+
+    // Quick click (without drag) on an input pin disconnects existing incoming wires
+    if (wire.side === 'in' && wire.nodeId === toNode && wire.portId === toPort && !wire.moved) {
+      onChange({
+        ...graph,
+        edges: graph.edges.filter(
+          (ed) => !(ed.toNode === toNode && ed.toPort === toPort)
+        ),
+      });
       return;
     }
 
-    // For data inputs, replace any existing incoming wire on that port; for exec, allow multiple incoming
-    let nextEdges = graph.edges.filter((e) => {
-      if (
-        e.fromNode === draggingWire.fromNode &&
-        e.fromPort === draggingWire.fromPort &&
-        e.toNode === toNode &&
-        e.toPort === toPort
-      ) {
-        return false;
-      }
-      if (toType !== 'exec' && e.toNode === toNode && e.toPort === toPort) {
-        return false;
-      }
-      if (
-        draggingWire.fromType === 'exec' &&
-        e.fromNode === draggingWire.fromNode &&
-        e.fromPort === draggingWire.fromPort
-      ) {
-        return false;
-      }
-      return true;
-    });
+    if (wire.side !== 'out') return;
+    if (wire.nodeId === toNode) return;
+    if (!arePortsCompatible(wire.portType, toType)) return;
 
-    const edgeId = makeUniqueId(
-      'edge',
-      nextEdges.map((e) => e.id)
-    );
-    const newEdge: GraphEdge = {
-      id: edgeId,
-      fromNode: draggingWire.fromNode,
-      fromPort: draggingWire.fromPort,
+    const nextEdges = buildConnectedEdges(
+      graph.edges,
+      wire.nodeId,
+      wire.portId,
+      wire.portType,
       toNode,
       toPort,
-    };
-    nextEdges = [...nextEdges, newEdge];
+      toType
+    );
     onChange({ ...graph, edges: nextEdges });
-    setDraggingWire(null);
   };
+
+  const handleConnectToOutput = (
+    fromNode: string,
+    fromPort: string,
+    fromType: PortType
+  ) => {
+    if (readOnly || !draggingWire) return;
+    const wire = draggingWire;
+    setDraggingWire(null);
+
+    if (wire.side !== 'in') return;
+    if (wire.nodeId === fromNode) return;
+    if (!arePortsCompatible(fromType, wire.portType)) return;
+
+    const nextEdges = buildConnectedEdges(
+      graph.edges,
+      fromNode,
+      fromPort,
+      fromType,
+      wire.nodeId,
+      wire.portId,
+      wire.portType
+    );
+    onChange({ ...graph, edges: nextEdges });
+  };
+
+  // Preview wire shown while dragging OR while context palette is open for a pending wire
+  const previewWire = draggingWire
+    ? draggingWire.side === 'out'
+      ? {
+          x1: draggingWire.startX,
+          y1: draggingWire.startY,
+          x2: draggingWire.curX,
+          y2: draggingWire.curY,
+          color: PORT_COLOR[draggingWire.portType],
+        }
+      : {
+          x1: draggingWire.curX,
+          y1: draggingWire.curY,
+          x2: draggingWire.startX,
+          y2: draggingWire.startY,
+          color: PORT_COLOR[draggingWire.portType],
+        }
+    : palette?.pendingWire
+      ? palette.pendingWire.side === 'out'
+        ? {
+            x1: palette.pendingWire.anchorX,
+            y1: palette.pendingWire.anchorY,
+            x2: palette.graphX,
+            y2: palette.graphY,
+            color: PORT_COLOR[palette.pendingWire.portType],
+          }
+        : {
+            x1: palette.graphX,
+            y1: palette.graphY,
+            x2: palette.pendingWire.anchorX,
+            y2: palette.pendingWire.anchorY,
+            color: PORT_COLOR[palette.pendingWire.portType],
+          }
+      : null;
 
   return (
     <div className="flex-1 flex min-h-0 min-w-0 overflow-hidden bg-[#0B0F14]">
@@ -557,8 +841,17 @@ export function NodeGraphEditor({
               <button
                 type="button"
                 onClick={() => {
-                  setPalettePos(null);
-                  setPaletteOpen((v) => !v);
+                  if (palette && !palette.pendingWire) {
+                    setPalette(null);
+                  } else {
+                    setPaletteSearch('');
+                    setPalette({
+                      screenX: 12,
+                      screenY: 12,
+                      graphX: Math.round((240 - camera.x) / camera.zoom),
+                      graphY: Math.round((160 - camera.y) / camera.zoom),
+                    });
+                  }
                 }}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded transition-colors cursor-pointer"
               >
@@ -624,16 +917,14 @@ export function NodeGraphEditor({
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
           onContextMenu={(e) => {
             e.preventDefault();
             if (readOnly) return;
-            setPalettePos(clientToGraph(e.clientX, e.clientY));
-            setPaletteOpen(true);
+            openPaletteAtClient(e.clientX, e.clientY);
           }}
           style={{
-            backgroundImage:
-              'radial-gradient(#1E2B3A 1px, transparent 1px)',
+            backgroundImage: 'radial-gradient(#1E2B3A 1px, transparent 1px)',
             backgroundSize: `${Math.max(12, Math.round(24 * camera.zoom))}px ${Math.max(12, Math.round(24 * camera.zoom))}px`,
             backgroundPosition: `${camera.x}px ${camera.y}px`,
           }}
@@ -692,16 +983,16 @@ export function NodeGraphEditor({
                 );
               })}
 
-              {draggingWire && (
+              {previewWire && (
                 <path
                   d={bezierPath(
-                    draggingWire.startX,
-                    draggingWire.startY,
-                    draggingWire.curX,
-                    draggingWire.curY
+                    previewWire.x1,
+                    previewWire.y1,
+                    previewWire.x2,
+                    previewWire.y2
                   )}
                   fill="none"
-                  stroke={PORT_COLOR[draggingWire.fromType]}
+                  stroke={previewWire.color}
                   strokeWidth={2}
                   strokeDasharray="5 4"
                 />
@@ -725,7 +1016,7 @@ export function NodeGraphEditor({
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     setSelectedNodeId(node.id);
-                    setPaletteOpen(false);
+                    setPalette(null);
                     if (!readOnly && e.button === 0) {
                       nodeDragRef.current = {
                         nodeId: node.id,
@@ -787,22 +1078,31 @@ export function NodeGraphEditor({
                               <>
                                 <button
                                   type="button"
-                                  title={`${inPort.label} (${inPort.type})`}
+                                  title={`${inPort.label} (${inPort.type}) · Click to detach or drag to connect`}
                                   onPointerDown={(e) => {
                                     e.stopPropagation();
-                                    // Clicking an input pin disconnects existing incoming data wires
-                                    if (!readOnly && !draggingWire) {
-                                      onChange({
-                                        ...graph,
-                                        edges: graph.edges.filter(
-                                          (ed) =>
-                                            !(
-                                              ed.toNode === node.id &&
-                                              ed.toPort === inPort.id
-                                            )
-                                        ),
-                                      });
-                                    }
+                                    if (readOnly || e.button !== 0) return;
+                                    setPalette(null);
+                                    const p = getPortPosition(
+                                      node,
+                                      'in',
+                                      inPort.id
+                                    );
+                                    setDraggingWire({
+                                      side: 'in',
+                                      nodeId: node.id,
+                                      portId: inPort.id,
+                                      portType: inPort.type,
+                                      portLabel: inPort.label,
+                                      nodeLabel: def?.label ?? node.type,
+                                      startX: p.x,
+                                      startY: p.y,
+                                      curX: p.x,
+                                      curY: p.y,
+                                      startClientX: e.clientX,
+                                      startClientY: e.clientY,
+                                      moved: false,
+                                    });
                                   }}
                                   onPointerUp={(e) => {
                                     e.stopPropagation();
@@ -837,24 +1137,39 @@ export function NodeGraphEditor({
                                 </span>
                                 <button
                                   type="button"
-                                  title={`${outPort.label} (${outPort.type})`}
+                                  title={`${outPort.label} (${outPort.type}) · Drag to connect or drop on canvas`}
                                   onPointerDown={(e) => {
                                     e.stopPropagation();
-                                    if (readOnly) return;
+                                    if (readOnly || e.button !== 0) return;
+                                    setPalette(null);
                                     const p = getPortPosition(
                                       node,
                                       'out',
                                       outPort.id
                                     );
                                     setDraggingWire({
-                                      fromNode: node.id,
-                                      fromPort: outPort.id,
-                                      fromType: outPort.type,
+                                      side: 'out',
+                                      nodeId: node.id,
+                                      portId: outPort.id,
+                                      portType: outPort.type,
+                                      portLabel: outPort.label,
+                                      nodeLabel: def?.label ?? node.type,
                                       startX: p.x,
                                       startY: p.y,
                                       curX: p.x,
                                       curY: p.y,
+                                      startClientX: e.clientX,
+                                      startClientY: e.clientY,
+                                      moved: false,
                                     });
+                                  }}
+                                  onPointerUp={(e) => {
+                                    e.stopPropagation();
+                                    handleConnectToOutput(
+                                      node.id,
+                                      outPort.id,
+                                      outPort.type
+                                    );
                                   }}
                                   style={{
                                     backgroundColor: PORT_COLOR[outPort.type],
@@ -877,12 +1192,45 @@ export function NodeGraphEditor({
             })}
           </div>
 
-          {/* Searchable Scope-Filtered Add Node Palette */}
-          {paletteOpen && !readOnly && (
+          {/* Searchable Context-Positioned Add Node Palette */}
+          {palette && !readOnly && (
             <div
+              data-graph-overlay="true"
               onPointerDown={(e) => e.stopPropagation()}
-              className="absolute top-3 left-3 z-30 w-64 max-h-[75%] bg-[#111720] border border-[#2D3C4E] rounded-lg shadow-2xl flex flex-col overflow-hidden"
+              onPointerUp={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.stopPropagation()}
+              style={{
+                left: `${palette.screenX}px`,
+                top: `${palette.screenY}px`,
+                width: `${PALETTE_W}px`,
+                maxHeight: `${PALETTE_MAX_H}px`,
+              }}
+              className="absolute z-30 bg-[#111720] border border-[#2D3C4E] rounded-lg shadow-2xl flex flex-col overflow-hidden"
             >
+              {palette.pendingWire && (
+                <div className="px-2.5 py-1.5 border-b border-[#1F2A38] bg-[#17202B]/80 flex items-center justify-between gap-2 text-[11px]">
+                  <span className="flex items-center gap-1.5 min-w-0 text-[#E6EDF3]">
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{
+                        backgroundColor:
+                          PORT_COLOR[palette.pendingWire.portType],
+                      }}
+                    />
+                    <span className="truncate">
+                      {palette.pendingWire.side === 'out' ? 'From ' : 'Into '}
+                      <strong className="font-semibold">
+                        {palette.pendingWire.nodeLabel}
+                      </strong>
+                      .{palette.pendingWire.portLabel}
+                    </span>
+                  </span>
+                  <span className="font-mono text-[10px] text-[#8B98A9] shrink-0">
+                    {palette.pendingWire.portType}
+                  </span>
+                </div>
+              )}
+
               <div className="p-2 border-b border-[#1F2A38] flex items-center gap-2">
                 <Search className="w-3.5 h-3.5 text-[#8B98A9] shrink-0" />
                 <input
@@ -890,18 +1238,35 @@ export function NodeGraphEditor({
                   autoFocus
                   value={paletteSearch}
                   onChange={(e) => setPaletteSearch(e.target.value)}
-                  placeholder="Search nodes..."
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const firstDef = filteredPalette[0]?.[1]?.[0];
+                      if (firstDef) {
+                        e.preventDefault();
+                        handleAddNode(firstDef.type);
+                      }
+                    } else if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setPalette(null);
+                    }
+                  }}
+                  placeholder={
+                    palette.pendingWire
+                      ? 'Search compatible nodes...'
+                      : 'Search nodes...'
+                  }
                   className="flex-1 bg-transparent text-xs text-[#E6EDF3] placeholder:text-[#8B98A9]/70 focus:outline-none"
                 />
                 <button
                   type="button"
-                  onClick={() => setPaletteOpen(false)}
+                  onClick={() => setPalette(null)}
                   className="p-0.5 text-[#8B98A9] hover:text-[#E6EDF3] cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto p-1.5 space-y-2">
+
+              <div className="flex-1 overflow-y-auto overscroll-contain p-1.5 space-y-2">
                 {filteredPalette.map(([cat, defs]) => (
                   <div key={cat}>
                     <div className="px-2 py-1 text-[10px] font-semibold text-[#8B98A9] capitalize">
@@ -926,7 +1291,7 @@ export function NodeGraphEditor({
                 ))}
                 {filteredPalette.length === 0 && (
                   <div className="p-3 text-center text-xs text-[#8B98A9]">
-                    No matching nodes
+                    No compatible nodes found
                   </div>
                 )}
               </div>

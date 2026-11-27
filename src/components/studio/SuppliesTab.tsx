@@ -5,6 +5,7 @@ import {
   SupplyManifest,
 } from '../../engine/sdk';
 import { makeUniqueId } from './studioUtils';
+import { NumberInput } from './NumberInput';
 
 interface SuppliesTabProps {
   manifest: RulesetManifest;
@@ -116,15 +117,12 @@ export function SuppliesTab({ manifest, readOnly, onChange }: SuppliesTabProps) 
                     <label className="block text-[11px] text-[#8B98A9] mb-1">
                       Overlay Scale
                     </label>
-                    <input
-                      type="number"
+                    <NumberInput
                       min={1}
                       disabled={readOnly}
                       value={s.maxExpected}
-                      onChange={(e) =>
-                        updateSupply(idx, {
-                          maxExpected: Math.max(1, Number(e.target.value)),
-                        })
+                      onChange={(maxExpected) =>
+                        updateSupply(idx, { maxExpected })
                       }
                       className={`${INPUT_CLASS} font-mono tabular-nums`}
                     />
@@ -133,16 +131,11 @@ export function SuppliesTab({ manifest, readOnly, onChange }: SuppliesTabProps) 
                     <label className="block text-[11px] text-[#8B98A9] mb-1">
                       Max Cap
                     </label>
-                    <input
-                      type="number"
+                    <NumberInput
                       min={1}
                       disabled={readOnly}
                       value={s.maxAmount ?? 99}
-                      onChange={(e) =>
-                        updateSupply(idx, {
-                          maxAmount: Math.max(1, Number(e.target.value)),
-                        })
-                      }
+                      onChange={(maxAmount) => updateSupply(idx, { maxAmount })}
                       className={`${INPUT_CLASS} font-mono tabular-nums`}
                     />
                   </div>
@@ -214,17 +207,13 @@ export function SuppliesTab({ manifest, readOnly, onChange }: SuppliesTabProps) 
                   {s.decay.kind === 'linear' && (
                     <div className="inline-flex items-center gap-1.5">
                       <span className="text-[#8B98A9]">Amount:</span>
-                      <input
-                        type="number"
+                      <NumberInput
                         min={1}
                         disabled={readOnly}
                         value={s.decay.amount}
-                        onChange={(e) =>
+                        onChange={(amount) =>
                           updateSupply(idx, {
-                            decay: {
-                              kind: 'linear',
-                              amount: Math.max(1, Number(e.target.value)),
-                            },
+                            decay: { kind: 'linear', amount },
                           })
                         }
                         className="w-20 bg-[#0B0F14] border border-[#1F2A38] rounded px-2 py-1 text-xs font-mono text-[#E6EDF3]"
@@ -235,22 +224,18 @@ export function SuppliesTab({ manifest, readOnly, onChange }: SuppliesTabProps) 
                   {s.decay.kind === 'percent' && (
                     <div className="inline-flex items-center gap-1.5">
                       <span className="text-[#8B98A9]">Retain Ratio (0–1):</span>
-                      <input
-                        type="number"
+                      <NumberInput
                         min={0}
                         max={1}
                         step={0.05}
                         disabled={readOnly}
                         value={s.decay.retainRatio}
-                        onChange={(e) =>
+                        onChange={(retainRatio) =>
                           updateSupply(idx, {
                             decay: {
                               ...s.decay,
                               kind: 'percent',
-                              retainRatio: Math.max(
-                                0,
-                                Math.min(1, Number(e.target.value))
-                              ),
+                              retainRatio,
                             },
                           })
                         }

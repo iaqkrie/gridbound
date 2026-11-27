@@ -1,7 +1,7 @@
 {
   "name": "gridbound",
   "private": true,
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Turn-based cellular strategy engine, node-native Schema v4 Ruleset SDK, and visual Ruleset Studio built around spatial supplies, GlobalState, 32x32 sprites, and universal interfaces.",
   "license": "MIT",
   "author": "iaqkrie & Gemini 4 Neon",

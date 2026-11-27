@@ -4,6 +4,25 @@ All notable changes to **gridbound** will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.0-alpha.2] - 2026-11-27
+
+Usability polish and bug-fix release for the **Visual Ruleset Studio** (Node Graph Editor, 32×32 Sprite Editor, and numeric/ID form controls).
+
+### Added
+- **Node Graph Editor — Context-Aware Creation**
+  - Right-clicking on the canvas now opens the searchable Add Node palette directly at the cursor position (clamped cleanly inside the viewport).
+  - Dragging a wire from any output or input pin into empty canvas space opens a filtered palette showing only nodes with compatible pins; selecting a node spawns it at the drop location already wired to the source pin.
+- **Sprite Editor Improvements**
+  - Enlarged the 32×32 drawing canvas for more comfortable pixel-art editing and removed rounded canvas corners so corner pixels remain sharp squares.
+  - Upgraded the pixel grid overlay to a dual-tone high-contrast dashed grid with 8×8 quadrant guides so cell boundaries stay visible over solid white, gray, or dark fills.
+  - Added `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` undo/redo keyboard shortcuts inside the Sprite Editor.
+
+### Fixed
+- **Numeric Input Editing:** Replaced raw browser `<input type="number">` handlers across the entire Studio with a dedicated `NumberInput` component so clearing, backspacing, and typing negative, decimal, or multi-digit numbers no longer snaps back to `min` (e.g. `4`) mid-typing; clamping now runs cleanly on blur or `Enter`.
+- **Sprite Editor Undo Crash:** Fixed a React state updater race where clearing `strokeStartRef` pushed `null` into the undo stack, causing a fatal blank dark screen when clicking Undo and losing unsaved edits on reload. Also fixed rapid single-click strokes syncing against stale pixel refs.
+- **Sprite / Cell / Interface ID Editing Glitches:** Switched editor selection and list keys from mutable IDs to stable indices with inline non-empty & uniqueness validation (plus reference cascading on valid renames), preventing selection jumps, duplicate-key glitches, and accidental undo-history resets while typing or clearing IDs.
+- **Node Palette Mouse-Wheel Scrolling:** Prevented the node graph canvas zoom handler from intercepting wheel events over the Add Node palette so scrolling with the mouse wheel scrolls the node list instead of zooming the canvas underneath.
+
 ## [0.1.0-alpha.1] - 2026-11-27
 
 Major architectural overhaul introducing the **Node-Native Schema v4** engine core, universal interfaces, 32×32 PNG sprites, layer/mask world generation, and the all-new **Visual Ruleset Studio**.

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -25,6 +25,7 @@ import {
   UiTemplateContext,
 } from '../../engine/sdk';
 import { NodeGraphEditor } from './NodeGraphEditor';
+import { NumberInput } from './NumberInput';
 import { makeUniqueId } from './studioUtils';
 
 interface InterfacesTabProps {
@@ -99,8 +100,13 @@ export function InterfacesTab({
   readOnly,
   onChange,
 }: InterfacesTabProps) {
-  const [selectedId, setSelectedId] = useState<string>(
-    manifest.interfaces[0]?.id ?? BUILTIN_INTERFACE_IDS[0]
+  const [selection, setSelection] = useState<
+    | { kind: 'builtin'; id: BuiltinInterfaceId }
+    | { kind: 'custom'; index: number }
+  >(() =>
+    manifest.interfaces.length > 0
+      ? { kind: 'custom', index: 0 }
+      : { kind: 'builtin', id: BUILTIN_INTERFACE_IDS[0] }
   );
   const [subTab, setSubTab] = useState<InterfaceSubTab>('blocks');
   const [newBlockKind, setNewBlockKind] =
@@ -109,30 +115,89 @@ export function InterfacesTab({
     manifest.cellTypes[0]?.id ?? ''
   );
 
-  const isBuiltinSelected = BUILTIN_INTERFACE_IDS.includes(
-    selectedId as BuiltinInterfaceId
-  );
-  const selectedBuiltin = isBuiltinSelected
-    ? BUILTIN_INTERFACES[selectedId as BuiltinInterfaceId]
-    : null;
-  const selectedCustom = !isBuiltinSelected
-    ? (manifest.interfaces.find((i) => i.id === selectedId) ?? null)
-    : null;
+  const selectedBuiltin =
+    selection.kind === 'builtin' ? BUILTIN_INTERFACES[selection.id] : null;
+  const safeCustomIndex =
+    selection.kind === 'custom' && manifest.interfaces.length > 0
+      ? Math.min(selection.index, manifest.interfaces.length - 1)
+      : -1;
+  const selectedCustom =
+    safeCustomIndex >= 0 ? manifest.interfaces[safeCustomIndex] : null;
 
-  const updateCustomInterface = (
-    ifaceId: string,
+  const [idDraft, setIdDraft] = useState<string>(selectedCustom?.id ?? '');
+  const [idError, setIdError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIdDraft(selectedCustom?.id ?? '');
+    setIdError(null);
+  }, [safeCustomIndex, selectedCustom?.id]);
+
+  const updateCustomInterfaceAt = (
+    index: number,
     updater: (iface: InterfaceManifest) => InterfaceManifest
   ) => {
-    if (readOnly) return;
-    let renamedTo: string | null = null;
-    const nextList = manifest.interfaces.map((item) => {
-      if (item.id !== ifaceId) return item;
-      const updated = updater(item);
-      if (updated.id !== item.id) renamedTo = updated.id;
-      return updated;
-    });
-    onChange({ ...manifest, interfaces: nextList });
-    if (renamedTo) setSelectedId(renamedTo);
+    if (readOnly || index < 0 || index >= manifest.interfaces.length) return;
+    const prevItem = manifest.interfaces[index];
+    const updated = updater(prevItem);
+    const nextList = manifest.interfaces.map((item, i) =>
+      i === index ? updated : item
+    );
+    const renamed = updated.id !== prevItem.id;
+    const nextManifest: RulesetManifest = {
+      ...manifest,
+      interfaces: nextList,
+    };
+    if (renamed) {
+      if (nextManifest.defaultHoverInterfaceId === prevItem.id) {
+        nextManifest.defaultHoverInterfaceId = updated.id;
+      }
+      nextManifest.cellTypes = nextManifest.cellTypes.map((ct) =>
+        ct.hoverInterfaceId === prevItem.id
+          ? { ...ct, hoverInterfaceId: updated.id }
+          : ct
+      );
+    }
+    onChange(nextManifest);
+  };
+
+  const handleCustomIdChange = (raw: string) => {
+    if (readOnly || safeCustomIndex < 0 || !selectedCustom) return;
+    setIdDraft(raw);
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      setIdError('ID cannot be empty');
+      return;
+    }
+    if (trimmed.startsWith('@builtin/')) {
+      setIdError('Custom ID cannot start with @builtin/');
+      return;
+    }
+    const isDuplicate = manifest.interfaces.some(
+      (item, i) => i !== safeCustomIndex && item.id === trimmed
+    );
+    if (isDuplicate) {
+      setIdError(`ID "${trimmed}" already exists`);
+      return;
+    }
+    setIdError(null);
+    if (trimmed !== selectedCustom.id) {
+      updateCustomInterfaceAt(safeCustomIndex, (i) => ({ ...i, id: trimmed }));
+    }
+  };
+
+  const handleCustomIdBlur = () => {
+    if (!selectedCustom) return;
+    const trimmed = idDraft.trim();
+    const invalid =
+      !trimmed ||
+      trimmed.startsWith('@builtin/') ||
+      manifest.interfaces.some(
+        (item, i) => i !== safeCustomIndex && item.id === trimmed
+      );
+    if (invalid) {
+      setIdDraft(selectedCustom.id);
+      setIdError(null);
+    }
   };
 
   const handleAddInterface = () => {
@@ -169,8 +234,9 @@ export function InterfacesTab({
         edges: [],
       },
     };
-    onChange({ ...manifest, interfaces: [...manifest.interfaces, created] });
-    setSelectedId(id);
+    const nextList = [...manifest.interfaces, created];
+    onChange({ ...manifest, interfaces: nextList });
+    setSelection({ kind: 'custom', index: nextList.length - 1 });
     setSubTab('blocks');
   };
 
@@ -182,8 +248,9 @@ export function InterfacesTab({
       manifest.interfaces.map((i) => i.id)
     );
     const cloned = cloneBuiltinInterface(builtinId, id);
-    onChange({ ...manifest, interfaces: [...manifest.interfaces, cloned] });
-    setSelectedId(id);
+    const nextList = [...manifest.interfaces, cloned];
+    onChange({ ...manifest, interfaces: nextList });
+    setSelection({ kind: 'custom', index: nextList.length - 1 });
     setSubTab('blocks');
   };
 
@@ -195,16 +262,23 @@ export function InterfacesTab({
     );
     const copy: InterfaceManifest = JSON.parse(JSON.stringify(selectedCustom));
     copy.id = id;
-    onChange({ ...manifest, interfaces: [...manifest.interfaces, copy] });
-    setSelectedId(id);
+    const nextList = [...manifest.interfaces, copy];
+    onChange({ ...manifest, interfaces: nextList });
+    setSelection({ kind: 'custom', index: nextList.length - 1 });
   };
 
-  const handleDeleteCustom = (ifaceId: string) => {
+  const handleDeleteCustom = (index: number) => {
     if (readOnly) return;
-    const next = manifest.interfaces.filter((i) => i.id !== ifaceId);
+    const next = manifest.interfaces.filter((_, i) => i !== index);
     onChange({ ...manifest, interfaces: next });
-    if (selectedId === ifaceId) {
-      setSelectedId(next[0]?.id ?? BUILTIN_INTERFACE_IDS[0]);
+    if (selection.kind === 'custom') {
+      if (next.length === 0) {
+        setSelection({ kind: 'builtin', id: BUILTIN_INTERFACE_IDS[0] });
+      } else if (safeCustomIndex >= next.length) {
+        setSelection({ kind: 'custom', index: next.length - 1 });
+      } else if (index < safeCustomIndex) {
+        setSelection({ kind: 'custom', index: safeCustomIndex - 1 });
+      }
     }
   };
 
@@ -246,7 +320,7 @@ export function InterfacesTab({
 
   const updateBlock = (idx: number, nextBlock: InterfaceBlock) => {
     if (!selectedCustom || readOnly) return;
-    updateCustomInterface(selectedCustom.id, (iface) => {
+    updateCustomInterfaceAt(safeCustomIndex, (iface) => {
       const next = [...iface.blocks];
       next[idx] = nextBlock;
       return { ...iface, blocks: next };
@@ -257,7 +331,7 @@ export function InterfacesTab({
     if (!selectedCustom || readOnly) return;
     const target = idx + dir;
     if (target < 0 || target >= selectedCustom.blocks.length) return;
-    updateCustomInterface(selectedCustom.id, (iface) => {
+    updateCustomInterfaceAt(safeCustomIndex, (iface) => {
       const next = [...iface.blocks];
       [next[idx], next[target]] = [next[target], next[idx]];
       return { ...iface, blocks: next };
@@ -266,7 +340,7 @@ export function InterfacesTab({
 
   const deleteBlock = (idx: number) => {
     if (!selectedCustom || readOnly) return;
-    updateCustomInterface(selectedCustom.id, (iface) => ({
+    updateCustomInterfaceAt(safeCustomIndex, (iface) => ({
       ...iface,
       blocks: iface.blocks.filter((_, i) => i !== idx),
     }));
@@ -401,12 +475,12 @@ export function InterfacesTab({
           <div className="space-y-1">
             {BUILTIN_INTERFACE_IDS.map((bid) => {
               const meta = BUILTIN_INTERFACES[bid];
-              const active = selectedId === bid;
+              const active = selection.kind === 'builtin' && selection.id === bid;
               return (
                 <button
                   key={bid}
                   type="button"
-                  onClick={() => setSelectedId(bid)}
+                  onClick={() => setSelection({ kind: 'builtin', id: bid })}
                   className={`w-full text-left px-2.5 py-2 rounded-md border transition-colors cursor-pointer ${
                     active
                       ? 'bg-[#17202B] border-[#10B981]'
@@ -448,11 +522,11 @@ export function InterfacesTab({
               No custom interfaces yet. Add one or clone a built-in template.
             </p>
           ) : (
-            manifest.interfaces.map((iface) => {
-              const active = selectedId === iface.id;
+            manifest.interfaces.map((iface, idx) => {
+              const active = selection.kind === 'custom' && idx === safeCustomIndex;
               return (
                 <div
-                  key={iface.id}
+                  key={idx}
                   className={`flex items-center gap-1.5 px-2.5 py-2 rounded-md border transition-colors ${
                     active
                       ? 'bg-[#17202B] border-[#10B981]'
@@ -461,7 +535,7 @@ export function InterfacesTab({
                 >
                   <button
                     type="button"
-                    onClick={() => setSelectedId(iface.id)}
+                    onClick={() => setSelection({ kind: 'custom', index: idx })}
                     className="flex-1 min-w-0 text-left cursor-pointer"
                   >
                     <div className="text-xs font-medium text-[#E6EDF3] truncate">
@@ -474,7 +548,7 @@ export function InterfacesTab({
                   {!readOnly && (
                     <button
                       type="button"
-                      onClick={() => handleDeleteCustom(iface.id)}
+                      onClick={() => handleDeleteCustom(idx)}
                       title="Delete interface"
                       className="p-1 text-[#8B98A9] hover:text-[#F43F5E] cursor-pointer shrink-0"
                     >
@@ -580,15 +654,18 @@ export function InterfacesTab({
                       <input
                         type="text"
                         disabled={readOnly}
-                        value={selectedCustom.id}
-                        onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
-                            ...i,
-                            id: e.target.value,
-                          }))
-                        }
-                        className={`${INPUT_CLASS} font-mono`}
+                        value={idDraft}
+                        onChange={(e) => handleCustomIdChange(e.target.value)}
+                        onBlur={handleCustomIdBlur}
+                        className={`${INPUT_CLASS} font-mono ${
+                          idError ? 'border-[#F43F5E] focus:border-[#F43F5E]' : ''
+                        }`}
                       />
+                      {idError && (
+                        <p className="text-[10px] text-[#F43F5E] mt-1">
+                          {idError}
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label className={LABEL_CLASS}>
@@ -599,7 +676,7 @@ export function InterfacesTab({
                         disabled={readOnly}
                         value={selectedCustom.title}
                         onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
+                          updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                             ...i,
                             title: e.target.value,
                           }))
@@ -613,7 +690,7 @@ export function InterfacesTab({
                         disabled={readOnly}
                         value={selectedCustom.role ?? 'popover'}
                         onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
+                          updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                             ...i,
                             role: e.target.value as InterfaceRole,
                           }))
@@ -635,7 +712,7 @@ export function InterfacesTab({
                         disabled={readOnly}
                         value={selectedCustom.subtitle ?? ''}
                         onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
+                          updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                             ...i,
                             subtitle: e.target.value,
                           }))
@@ -645,16 +722,16 @@ export function InterfacesTab({
                     </div>
                     <div>
                       <label className={LABEL_CLASS}>Width (px)</label>
-                      <input
-                        type="number"
+                      <NumberInput
                         min={180}
                         max={480}
+                        integer
                         disabled={readOnly}
                         value={selectedCustom.width ?? 256}
-                        onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
+                        onChange={(width) =>
+                          updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                             ...i,
-                            width: Math.max(180, Number(e.target.value)),
+                            width,
                           }))
                         }
                         className={`${INPUT_CLASS} font-mono`}
@@ -666,7 +743,7 @@ export function InterfacesTab({
                         disabled={readOnly}
                         checked={Boolean(selectedCustom.showSwatch)}
                         onChange={(e) =>
-                          updateCustomInterface(selectedCustom.id, (i) => ({
+                          updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                             ...i,
                             showSwatch: e.target.checked,
                           }))
@@ -706,7 +783,7 @@ export function InterfacesTab({
                         <button
                           type="button"
                           onClick={() =>
-                            updateCustomInterface(selectedCustom.id, (i) => ({
+                            updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                               ...i,
                               blocks: [
                                 ...i.blocks,
@@ -1574,7 +1651,7 @@ export function InterfacesTab({
               manifest={manifest}
               readOnly={readOnly}
               onChange={(nextGraph) =>
-                updateCustomInterface(selectedCustom.id, (i) => ({
+                updateCustomInterfaceAt(safeCustomIndex, (i) => ({
                   ...i,
                   graph: nextGraph,
                 }))

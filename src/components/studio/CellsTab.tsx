@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Copy, Plus, Trash2 } from 'lucide-react';
 import {
   AccessLevel,
@@ -8,6 +8,7 @@ import {
   ValueType,
 } from '../../engine/sdk';
 import { NodeGraphEditor } from './NodeGraphEditor';
+import { NumberInput } from './NumberInput';
 import { makeUniqueId } from './studioUtils';
 
 interface CellsTabProps {
@@ -24,9 +25,7 @@ const INPUT_CLASS =
 const LABEL_CLASS = 'block text-[11px] font-medium text-[#8B98A9] mb-1';
 
 export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
-  const [selectedId, setSelectedId] = useState<string>(
-    manifest.cellTypes[0]?.id ?? ''
-  );
+  const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [subTab, setSubTab] = useState<CellSubTab>('properties');
 
   const spriteById = useMemo(
@@ -34,39 +33,73 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
     [manifest.sprites]
   );
 
+  const safeIndex =
+    manifest.cellTypes.length === 0
+      ? -1
+      : Math.min(selectedIndex, manifest.cellTypes.length - 1);
   const selectedCell =
-    manifest.cellTypes.find((c) => c.id === selectedId) ?? manifest.cellTypes[0];
+    safeIndex >= 0 ? manifest.cellTypes[safeIndex] : undefined;
 
-  const updateCell = (
-    cellId: string,
+  const [idDraft, setIdDraft] = useState<string>(selectedCell?.id ?? '');
+  const [idError, setIdError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIdDraft(selectedCell?.id ?? '');
+    setIdError(null);
+  }, [safeIndex, selectedCell?.id]);
+
+  const updateCellAt = (
+    index: number,
     updater: (cell: CellTypeManifest) => CellTypeManifest
   ) => {
-    if (readOnly) return;
-    let renamedFrom: string | null = null;
-    let renamedTo: string | null = null;
+    if (readOnly || index < 0 || index >= manifest.cellTypes.length) return;
+    const prevCell = manifest.cellTypes[index];
+    const updated = updater(prevCell);
+    const nextCells = manifest.cellTypes.map((c, i) =>
+      i === index ? updated : c
+    );
+    const renamed = updated.id !== prevCell.id;
 
-    const nextCells = manifest.cellTypes.map((c) => {
-      if (c.id !== cellId) return c;
-      const updated = updater(c);
-      if (updated.id !== c.id) {
-        renamedFrom = c.id;
-        renamedTo = updated.id;
-      }
-      return updated;
-    });
-
-    const nextManifest: RulesetManifest = {
+    onChange({
       ...manifest,
       cellTypes: nextCells,
       defaultCellTypeId:
-        renamedFrom && manifest.defaultCellTypeId === renamedFrom && renamedTo
-          ? renamedTo
+        renamed && manifest.defaultCellTypeId === prevCell.id
+          ? updated.id
           : manifest.defaultCellTypeId,
-    };
+    });
+  };
 
-    onChange(nextManifest);
-    if (renamedTo) {
-      setSelectedId(renamedTo);
+  const handleCellIdChange = (raw: string) => {
+    if (readOnly || safeIndex < 0 || !selectedCell) return;
+    setIdDraft(raw);
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      setIdError('ID cannot be empty');
+      return;
+    }
+    const isDuplicate = manifest.cellTypes.some(
+      (c, i) => i !== safeIndex && c.id === trimmed
+    );
+    if (isDuplicate) {
+      setIdError(`ID "${trimmed}" already exists`);
+      return;
+    }
+    setIdError(null);
+    if (trimmed !== selectedCell.id) {
+      updateCellAt(safeIndex, (c) => ({ ...c, id: trimmed }));
+    }
+  };
+
+  const handleCellIdBlur = () => {
+    if (!selectedCell) return;
+    const trimmed = idDraft.trim();
+    if (
+      !trimmed ||
+      manifest.cellTypes.some((c, i) => i !== safeIndex && c.id === trimmed)
+    ) {
+      setIdDraft(selectedCell.id);
+      setIdError(null);
     }
   };
 
@@ -97,8 +130,9 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
         edges: [],
       },
     };
-    onChange({ ...manifest, cellTypes: [...manifest.cellTypes, nextCell] });
-    setSelectedId(id);
+    const nextCells = [...manifest.cellTypes, nextCell];
+    onChange({ ...manifest, cellTypes: nextCells });
+    setSelectedIndex(nextCells.length - 1);
   };
 
   const handleDuplicateCell = () => {
@@ -110,15 +144,17 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
     const copy: CellTypeManifest = JSON.parse(JSON.stringify(selectedCell));
     copy.id = id;
     copy.name = `${selectedCell.name} Copy`;
-    onChange({ ...manifest, cellTypes: [...manifest.cellTypes, copy] });
-    setSelectedId(id);
+    const nextCells = [...manifest.cellTypes, copy];
+    onChange({ ...manifest, cellTypes: nextCells });
+    setSelectedIndex(nextCells.length - 1);
   };
 
-  const handleDeleteCell = (cellId: string) => {
+  const handleDeleteCell = (index: number) => {
     if (readOnly || manifest.cellTypes.length <= 1) return;
-    const remaining = manifest.cellTypes.filter((c) => c.id !== cellId);
+    const removed = manifest.cellTypes[index];
+    const remaining = manifest.cellTypes.filter((_, i) => i !== index);
     const nextDefault =
-      manifest.defaultCellTypeId === cellId
+      removed && manifest.defaultCellTypeId === removed.id
         ? remaining[0].id
         : manifest.defaultCellTypeId;
     onChange({
@@ -126,8 +162,10 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
       cellTypes: remaining,
       defaultCellTypeId: nextDefault,
     });
-    if (selectedId === cellId) {
-      setSelectedId(remaining[0]?.id ?? '');
+    if (safeIndex >= remaining.length) {
+      setSelectedIndex(Math.max(0, remaining.length - 1));
+    } else if (index < safeIndex) {
+      setSelectedIndex(safeIndex - 1);
     }
   };
 
@@ -144,7 +182,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
       initialValue: 0,
       access: 'public',
     };
-    updateCell(selectedCell.id, (c) => ({
+    updateCellAt(safeIndex, (c) => ({
       ...c,
       stateSchema: [...c.stateSchema, field],
     }));
@@ -155,7 +193,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
     patch: Partial<StateFieldManifest>
   ) => {
     if (!selectedCell || readOnly) return;
-    updateCell(selectedCell.id, (c) => {
+    updateCellAt(safeIndex, (c) => {
       const next = [...c.stateSchema];
       next[idx] = { ...next[idx], ...patch };
       return { ...c, stateSchema: next };
@@ -164,7 +202,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
 
   const removeStateField = (idx: number) => {
     if (!selectedCell || readOnly) return;
-    updateCell(selectedCell.id, (c) => {
+    updateCellAt(safeIndex, (c) => {
       const removed = c.stateSchema[idx];
       return {
         ...c,
@@ -214,15 +252,15 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {manifest.cellTypes.map((ct) => {
-            const active = ct.id === selectedCell?.id;
+          {manifest.cellTypes.map((ct, idx) => {
+            const active = idx === safeIndex;
             const sprite = ct.defaultSpriteId
               ? spriteById.get(ct.defaultSpriteId)
               : undefined;
             const isDefault = ct.id === manifest.defaultCellTypeId;
             return (
               <div
-                key={ct.id}
+                key={idx}
                 className={`flex items-center gap-2 px-2 py-1.5 rounded-md border transition-colors ${
                   active
                     ? 'bg-[#17202B] border-[#10B981]'
@@ -231,7 +269,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
               >
                 <button
                   type="button"
-                  onClick={() => setSelectedId(ct.id)}
+                  onClick={() => setSelectedIndex(idx)}
                   className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
                 >
                   <div
@@ -260,7 +298,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                 {!readOnly && manifest.cellTypes.length > 1 && (
                   <button
                     type="button"
-                    onClick={() => handleDeleteCell(ct.id)}
+                    onClick={() => handleDeleteCell(idx)}
                     title="Delete cell type"
                     className="p-1 text-[#8B98A9] hover:text-[#F43F5E] cursor-pointer shrink-0"
                   >
@@ -362,7 +400,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         disabled={readOnly}
                         value={selectedCell.name}
                         onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             name: e.target.value,
                           }))
@@ -375,15 +413,18 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                       <input
                         type="text"
                         disabled={readOnly}
-                        value={selectedCell.id}
-                        onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
-                            ...c,
-                            id: e.target.value,
-                          }))
-                        }
-                        className={`${INPUT_CLASS} font-mono`}
+                        value={idDraft}
+                        onChange={(e) => handleCellIdChange(e.target.value)}
+                        onBlur={handleCellIdBlur}
+                        className={`${INPUT_CLASS} font-mono ${
+                          idError ? 'border-[#F43F5E] focus:border-[#F43F5E]' : ''
+                        }`}
                       />
+                      {idError && (
+                        <p className="text-[10px] text-[#F43F5E] mt-1">
+                          {idError}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -394,7 +435,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                       disabled={readOnly}
                       value={selectedCell.description ?? ''}
                       onChange={(e) =>
-                        updateCell(selectedCell.id, (c) => ({
+                        updateCellAt(safeIndex, (c) => ({
                           ...c,
                           description: e.target.value,
                         }))
@@ -410,7 +451,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         disabled={readOnly}
                         value={selectedCell.defaultSpriteId ?? ''}
                         onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             defaultSpriteId: e.target.value || null,
                           }))
@@ -433,7 +474,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         disabled={readOnly}
                         value={selectedCell.substrateSpriteId ?? ''}
                         onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             substrateSpriteId: e.target.value || null,
                           }))
@@ -457,7 +498,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                           disabled={readOnly}
                           value={selectedCell.defaultColor}
                           onChange={(e) =>
-                            updateCell(selectedCell.id, (c) => ({
+                            updateCellAt(safeIndex, (c) => ({
                               ...c,
                               defaultColor: e.target.value,
                             }))
@@ -469,7 +510,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                           disabled={readOnly}
                           value={selectedCell.defaultColor}
                           onChange={(e) =>
-                            updateCell(selectedCell.id, (c) => ({
+                            updateCellAt(safeIndex, (c) => ({
                               ...c,
                               defaultColor: e.target.value,
                             }))
@@ -491,7 +532,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         disabled={readOnly}
                         value={selectedCell.defaultOpacity ?? 1}
                         onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             defaultOpacity: Number(e.target.value),
                           }))
@@ -517,7 +558,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         value={hoverSelectValue}
                         onChange={(e) => {
                           const v = e.target.value;
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             hoverInterfaceId:
                               v === '__inherit__'
@@ -553,7 +594,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                         disabled={readOnly}
                         value={selectedCell.priorityByState ?? ''}
                         onChange={(e) =>
-                          updateCell(selectedCell.id, (c) => ({
+                          updateCellAt(safeIndex, (c) => ({
                             ...c,
                             priorityByState: e.target.value || undefined,
                           }))
@@ -670,15 +711,11 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
                                 <option value="false">false</option>
                               </select>
                             ) : field.type === 'number' ? (
-                              <input
-                                type="number"
-                                step="any"
+                              <NumberInput
                                 disabled={readOnly}
                                 value={Number(field.initialValue)}
-                                onChange={(e) =>
-                                  updateStateField(idx, {
-                                    initialValue: Number(e.target.value),
-                                  })
+                                onChange={(initialValue) =>
+                                  updateStateField(idx, { initialValue })
                                 }
                                 className={`${INPUT_CLASS} font-mono tabular-nums`}
                               />
@@ -740,7 +777,7 @@ export function CellsTab({ manifest, readOnly, onChange }: CellsTabProps) {
               cellStateSchema={selectedCell.stateSchema}
               readOnly={readOnly}
               onChange={(nextGraph) =>
-                updateCell(selectedCell.id, (c) => ({ ...c, graph: nextGraph }))
+                updateCellAt(safeIndex, (c) => ({ ...c, graph: nextGraph }))
               }
             />
           )}
