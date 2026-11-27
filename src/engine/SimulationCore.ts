@@ -1,1292 +1,1505 @@
-import { t } from '../i18n';
 import {
-  Action,
-  AffordabilityCheck,
-  CellInspection,
-  CellNotification,
-  CellStateData,
+  applyDecayRule,
+  assertValidRuleset,
+  CellRuntimeSnapshot,
   CellTypeId,
   CellTypeManifest,
-  ClickExecutionResult,
-  DemolishInfo,
-  GridCoordinate,
-  GridMutator,
-  MouseButton,
-  MutableRuleWorld,
-  ResourceDelta,
-  ResourceId,
-  ResourceProjectionBreakdown,
-  ResolvedVisualState,
-  RuleEvalContext,
+  CellVisualState,
+  CompiledGraph,
+  compileGraph,
+  createSeededRng,
+  EmitArea,
+  executeGraphEntry,
+  GameNotification,
+  generateRandomSeed,
+  GlobalVarId,
+  GlobalVariableManifest,
+  GraphExecutionResult,
+  GraphScope,
+  GraphVmHost,
+  InterfaceId,
+  InterfaceManifest,
+  NotificationSeverity,
+  OpenInterfaceRequest,
+  ResourceBreakdown,
+  resumeGraphFromInterface,
   RulesetManifest,
+  RuntimeValue,
+  runWorldGeneratorGraph,
   SerializedSimulationState,
   SimulationStats,
-  StatusBadge,
-  StepResult,
-  SupplyEmission,
+  SpriteAssetManifest,
+  SpriteId,
+  StateFieldManifest,
   SupplyId,
   SupplyManifest,
-  WorldSetupValues,
-  applyDecayRule,
-  createSeededRng,
-  deriveBuildPreview,
-  deriveCycleExplanation,
-  deriveDemolishInfo,
-  evaluateCycleRules,
-  executeWorldRules,
-  extractStaticEmissions,
-  generateRandomSeed,
-  resolveCellBadge,
-  resolveCellVisual,
-  runWorldGeneratorPipeline,
+  UiTemplateContext,
 } from './sdk';
 
-function addDelta(target: ResourceDelta, delta: ResourceDelta | undefined): void {
-  if (!delta) return;
-  for (const [resId, amount] of Object.entries(delta)) {
-    if (!amount) continue;
-    target[resId] = (target[resId] ?? 0) + amount;
-  }
+export interface ActiveInterfaceContinuation {
+  compiled: CompiledGraph;
+  scope: GraphScope;
+  nodeId: string;
+  cellX: number;
+  cellY: number;
+  cellTypeId: CellTypeId;
+  cellTypeName: string;
+  request: OpenInterfaceRequest;
 }
 
-/**
- * Pure Ruleset-Agnostic Cellular Strategy Engine Core (Schema v2).
- *
- * Bounded grid, strictly 'unlimited' | 'capped' global resources, and a
- * declarative Rule/Condition/Action interpreter powering cell logic, clicks,
- * passive modifiers, visual overlays, panels, and world generation.
- *
- * 3-Phase Buffer Cycle Pipeline:
- *   Phase 1 — Consume, React & Transition
- *   Phase 2 — Decay (spatial supplies & optional decaying global resources)
- *   Phase 3 — Produce (spatial emissions & next-cycle global resources)
- */
+export interface InteractionResult {
+  mutated: boolean;
+  uiRequest?: OpenInterfaceRequest;
+  closeInterface?: boolean;
+}
+
+interface PendingTransform {
+  idx: number;
+  x: number;
+  y: number;
+  fromId: CellTypeId;
+  toId: CellTypeId;
+  reason: string;
+}
+
+interface CoreMutableState {
+  grid: Uint16Array;
+  cellStates: Map<number, Record<string, RuntimeValue>>;
+  cellVisuals: Map<number, CellVisualState>;
+  globalValues: Record<GlobalVarId, RuntimeValue>;
+  globalCaps: Record<GlobalVarId, number>;
+  supplies: Map<SupplyId, Int16Array>;
+  notifications: GameNotification[];
+  cycle: number;
+}
+
+const MAX_TRANSFORM_DEPTH = 16;
+
 export class SimulationCore {
   public readonly manifest: RulesetManifest;
-  public readonly width: number;
-  public readonly height: number;
-  public readonly seed: string;
+  public width: number;
+  public height: number;
+  public seed = '';
+  public setupValues: Record<string, RuntimeValue> = {};
 
-  private currentGrid: Uint8Array;
-  private nextGrid: Uint8Array;
-  private cellStates: (CellStateData | null)[];
-  private nextCellStates: (CellStateData | null)[];
-  private pendingEmissions: SupplyEmission[][];
-  private supplyBuffers: Map<SupplyId, Int16Array>;
-  private supplyDefsById: Map<SupplyId, SupplyManifest>;
-  private cellTypeByIndex: CellTypeManifest[];
-  private cellIndexById: Map<CellTypeId, number>;
-  private defaultCellIndex: number;
-  private resources: Record<ResourceId, number>;
-  private notifications: CellNotification[] = [];
-  private cycleCount = 0;
+  // Indexed manifest lookups
+  public readonly cellTypes: CellTypeManifest[];
+  public readonly cellTypeById = new Map<CellTypeId, CellTypeManifest>();
+  public readonly cellIndexById = new Map<CellTypeId, number>();
+  public readonly globalVarById = new Map<GlobalVarId, GlobalVariableManifest>();
+  public readonly supplyById = new Map<SupplyId, SupplyManifest>();
+  public readonly spriteById = new Map<SpriteId, SpriteAssetManifest>();
+  public readonly interfaceById = new Map<InterfaceId, InterfaceManifest>();
 
-  constructor(
-    manifest: RulesetManifest,
-    width?: number,
-    height?: number,
-    seed?: string
-  ) {
-    this.manifest = manifest;
-    this.width = width ?? manifest.defaultGridSize.width;
-    this.height = height ?? manifest.defaultGridSize.height;
-    this.seed = seed?.trim() || generateRandomSeed();
+  // Load-time compiled graphs
+  private readonly compiledGlobalGraph: CompiledGraph;
+  private readonly compiledCellGraphs = new Map<CellTypeId, CompiledGraph>();
+  private readonly compiledInterfaceGraphs = new Map<InterfaceId, CompiledGraph>();
+  private readonly stateFieldMapByCell = new Map<
+    CellTypeId,
+    Map<string, StateFieldManifest>
+  >();
 
-    this.cellTypeByIndex = [...manifest.cellTypes];
-    this.cellIndexById = new Map();
-    this.cellTypeByIndex.forEach((def, idx) => {
-      this.cellIndexById.set(def.id, idx);
+  // Live mutable simulation state
+  private state: CoreMutableState;
+  private pendingContinuation: ActiveInterfaceContinuation | null = null;
+  private stateVersion = 0;
+  private cachedStatsVersion = -1;
+  private cachedStats: SimulationStats | null = null;
+  private rng = createSeededRng('init');
+  private notifCounter = 0;
+  private transformDepth = 0;
+
+  constructor(rawManifest: RulesetManifest) {
+    this.manifest = assertValidRuleset(rawManifest);
+    this.width = this.manifest.defaultGridSize.width;
+    this.height = this.manifest.defaultGridSize.height;
+
+    this.cellTypes = this.manifest.cellTypes;
+    this.cellTypes.forEach((ct, index) => {
+      this.cellTypeById.set(ct.id, ct);
+      this.cellIndexById.set(ct.id, index);
+      this.compiledCellGraphs.set(ct.id, compileGraph(ct.graph, 'cell'));
+      const fieldMap = new Map<string, StateFieldManifest>();
+      for (const f of ct.stateSchema) {
+        fieldMap.set(f.key, f);
+      }
+      this.stateFieldMapByCell.set(ct.id, fieldMap);
     });
 
-    const defIdx = this.cellIndexById.get(manifest.defaultCellTypeId);
-    if (defIdx === undefined) {
-      throw new Error(
-        `Unknown defaultCellTypeId: ${manifest.defaultCellTypeId}`
-      );
+    for (const v of this.manifest.globalState.variables) {
+      this.globalVarById.set(v.id, v);
     }
-    this.defaultCellIndex = defIdx;
+    this.compiledGlobalGraph = compileGraph(this.manifest.globalState.graph, 'global');
 
-    const total = this.width * this.height;
-    this.currentGrid = new Uint8Array(total);
-    this.nextGrid = new Uint8Array(total);
-    this.cellStates = new Array(total).fill(null);
-    this.nextCellStates = new Array(total).fill(null);
-    this.pendingEmissions = new Array(total);
-    this.currentGrid.fill(this.defaultCellIndex);
-
-    this.resources = {};
-    for (const res of manifest.resources) {
-      this.resources[res.id] = res.initialValue;
+    for (const s of this.manifest.supplies) {
+      this.supplyById.set(s.id, s);
     }
-
-    this.supplyBuffers = new Map();
-    this.supplyDefsById = new Map();
-    for (const supply of manifest.supplies) {
-      this.supplyBuffers.set(supply.id, new Int16Array(total));
-      this.supplyDefsById.set(supply.id, supply);
+    for (const sp of this.manifest.sprites) {
+      this.spriteById.set(sp.id, sp);
     }
-  }
-
-  public static createNewGame(
-    manifest: RulesetManifest,
-    setup?: Partial<WorldSetupValues>
-  ): SimulationCore {
-    const width = setup?.width ?? manifest.defaultGridSize.width;
-    const height = setup?.height ?? manifest.defaultGridSize.height;
-    const seed = setup?.seed?.trim() || generateRandomSeed();
-
-    const defaultParams: Record<string, string | number | boolean> = {};
-    for (const param of manifest.setupOptions?.params ?? []) {
-      defaultParams[param.id] = param.defaultValue;
-    }
-    const mergedParams = { ...defaultParams, ...(setup?.params ?? {}) };
-
-    const core = new SimulationCore(manifest, width, height, seed);
-    core.generateNewMap({
-      width,
-      height,
-      seed,
-      params: mergedParams,
-    });
-
-    const initialCycles = manifest.initialCycles ?? 1;
-    for (let i = 0; i < initialCycles; i++) {
-      core.step();
-    }
-    return core;
-  }
-
-  public static deserialize(
-    manifest: RulesetManifest,
-    snapshot: SerializedSimulationState
-  ): SimulationCore {
-    const core = new SimulationCore(manifest, snapshot.width, snapshot.height);
-    const total = core.width * core.height;
-
-    for (let i = 0; i < total && i < snapshot.grid.length; i++) {
-      const idx = snapshot.grid[i];
-      core.currentGrid[i] =
-        idx >= 0 && idx < core.cellTypeByIndex.length
-          ? idx
-          : core.defaultCellIndex;
-
-      const savedState = snapshot.cellStates?.[i];
-      if (savedState && typeof savedState === 'object') {
-        core.cellStates[i] = { ...savedState };
-      } else {
-        core.cellStates[i] = core.createCellInitialState(
-          core.cellTypeByIndex[core.currentGrid[i]]
-        );
+    for (const iface of this.manifest.interfaces) {
+      this.interfaceById.set(iface.id, iface);
+      if (iface.graph) {
+        this.compiledInterfaceGraphs.set(iface.id, compileGraph(iface.graph, 'interface'));
       }
     }
 
-    core.cycleCount = snapshot.cycle;
-
-    for (const res of manifest.resources) {
-      const savedVal = snapshot.resources[res.id];
-      core.resources[res.id] =
-        typeof savedVal === 'number' ? savedVal : res.initialValue;
-    }
-
-    for (const supply of manifest.supplies) {
-      const buffer = core.supplyBuffers.get(supply.id);
-      const savedArr = snapshot.supplies?.[supply.id];
-      if (!buffer || !savedArr) continue;
-      for (let i = 0; i < total && i < savedArr.length; i++) {
-        buffer[i] = savedArr[i];
-      }
-    }
-
-    core.notifications = Array.isArray(snapshot.notifications)
-      ? snapshot.notifications.map((n) => ({ ...n }))
-      : [];
-
-    core.reconcileResourceCaps();
-    return core;
+    this.state = this.createEmptyState(this.width, this.height);
   }
 
-  public serialize(): SerializedSimulationState {
-    const supplies: Record<SupplyId, number[]> = {};
-    for (const [supplyId, buffer] of this.supplyBuffers.entries()) {
-      supplies[supplyId] = Array.from(buffer);
-    }
+  // ── Public Getters ───────────────────────────────────────────────────────
 
-    return {
-      rulesetId: this.manifest.id,
-      width: this.width,
-      height: this.height,
-      cycle: this.cycleCount,
-      resources: { ...this.resources },
-      grid: Array.from(this.currentGrid),
-      cellStates: this.cellStates.map((st) => (st ? { ...st } : null)),
-      supplies,
-      notifications: this.notifications.map((n) => ({ ...n })),
-    };
+  get cycle(): number {
+    return this.state.cycle;
   }
 
-  private createCellInitialState(def: CellTypeManifest): CellStateData | null {
-    return def.initialState ? { ...def.initialState } : null;
+  get grid(): Uint16Array {
+    return this.state.grid;
   }
 
-  public get cycle(): number {
-    return this.cycleCount;
-  }
-
-  public getNotifications(): CellNotification[] {
-    return [...this.notifications];
-  }
-
-  public dismissNotification(id: string): void {
-    this.notifications = this.notifications.filter((n) => n.id !== id);
-  }
-
-  public clearNotificationsAt(x: number, y: number): void {
-    this.notifications = this.notifications.filter(
-      (n) => !(n.x === x && n.y === y)
-    );
-  }
-
-  public getResources(): Record<ResourceId, number> {
-    return { ...this.resources };
-  }
-
-  public getResource(id: ResourceId): number {
-    return this.resources[id] ?? 0;
-  }
-
-  public getResourceCaps(): Record<ResourceId, number | null> {
-    const caps: Record<ResourceId, number | null> = {};
-    for (const res of this.manifest.resources) {
-      caps[res.id] = res.kind === 'capped' ? res.initialMax : null;
-    }
-
-    const total = this.currentGrid.length;
-    for (let i = 0; i < total; i++) {
-      const def = this.cellTypeByIndex[this.currentGrid[i]];
-      if (!def.modifiers || def.modifiers.length === 0) continue;
-      const st = this.cellStates[i];
-
-      for (const mod of def.modifiers) {
-        if (mod.type !== 'capBonus' || !mod.amount) continue;
-        const resId =
-          mod.resource ??
-          (mod.resourceFromState
-            ? String(st?.[mod.resourceFromState] ?? '')
-            : '');
-        if (!resId) continue;
-        if (caps[resId] !== null && caps[resId] !== undefined) {
-          caps[resId] = (caps[resId] as number) + mod.amount;
-        }
-      }
-    }
-
-    return caps;
-  }
-
-  public getResourceCap(id: ResourceId): number | null {
-    return this.getResourceCaps()[id] ?? null;
-  }
-
-  public reconcileResourceCaps(): void {
-    const caps = this.getResourceCaps();
-    for (const [resId, maxVal] of Object.entries(caps)) {
-      if (maxVal === null) continue;
-      const current = this.resources[resId] ?? 0;
-      if (current > maxVal) {
-        this.resources[resId] = maxVal;
-      }
-    }
-  }
-
-  public addResource(id: ResourceId, delta: number): void {
-    if (!delta) return;
-    const cap = this.getResourceCap(id);
-    let next = (this.resources[id] ?? 0) + delta;
-    if (cap !== null && next > cap) {
-      next = cap;
-    }
-    this.resources[id] = next;
-  }
-
-  public consumeResource(id: ResourceId, amount: number): boolean {
-    if (amount <= 0) return true;
-    const have = this.resources[id] ?? 0;
-    if (have < amount) return false;
-    this.resources[id] = have - amount;
-    return true;
+  get notifications(): GameNotification[] {
+    return this.state.notifications;
   }
 
   public inBounds(x: number, y: number): boolean {
-    return x >= 0 && x < this.width && y >= 0 && y < this.height;
+    return x >= 0 && y >= 0 && x < this.width && y < this.height;
+  }
+
+  public dismissNotification(id: string): void {
+    const before = this.state.notifications.length;
+    this.state.notifications = this.state.notifications.filter((n) => n.id !== id);
+    if (this.state.notifications.length !== before) {
+      this.bumpVersion();
+    }
   }
 
   public getCellTypeAt(x: number, y: number): CellTypeManifest {
-    const idx = this.currentGrid[y * this.width + x];
-    return this.cellTypeByIndex[idx];
-  }
-
-  public getCellStateAt(x: number, y: number): CellStateData {
-    if (!this.inBounds(x, y)) return {};
-    const st = this.cellStates[y * this.width + x];
-    return st ? { ...st } : {};
-  }
-
-  public patchCellState(x: number, y: number, patch: CellStateData): void {
-    if (!this.inBounds(x, y)) return;
     const idx = y * this.width + x;
-    const current = this.cellStates[idx] ?? {};
-    this.cellStates[idx] = { ...current, ...patch };
+    return this.cellTypes[this.state.grid[idx]] ?? this.cellTypes[0];
   }
 
-  public getCellTypeById(id: CellTypeId): CellTypeManifest | undefined {
-    const idx = this.cellIndexById.get(id);
-    return idx !== undefined ? this.cellTypeByIndex[idx] : undefined;
-  }
-
-  public getCellIndexBuffer(): Uint8Array {
-    return this.currentGrid;
-  }
-
-  public getCellTypes(): readonly CellTypeManifest[] {
-    return this.cellTypeByIndex;
+  public getCellVisualAt(x: number, y: number): CellVisualState {
+    const idx = y * this.width + x;
+    const existing = this.state.cellVisuals.get(idx);
+    if (existing) return existing;
+    const ct = this.getCellTypeAt(x, y);
+    return {
+      spriteId: ct.defaultSpriteId,
+      tintColor: null,
+      opacity: ct.defaultOpacity ?? 1,
+    };
   }
 
   public getSupplyBuffer(supplyId: SupplyId): Int16Array | undefined {
-    return this.supplyBuffers.get(supplyId);
+    return this.state.supplies.get(supplyId);
   }
 
   public getSupplyAt(x: number, y: number, supplyId: SupplyId): number {
-    const buffer = this.supplyBuffers.get(supplyId);
-    if (!buffer || !this.inBounds(x, y)) return 0;
-    return buffer[y * this.width + x];
+    const buf = this.state.supplies.get(supplyId);
+    if (!buf) return 0;
+    return buf[y * this.width + x] ?? 0;
   }
 
-  public getLocalSupplies(x: number, y: number): Record<SupplyId, number> {
+  public getGlobalValue(varId: GlobalVarId): RuntimeValue {
+    return this.state.globalValues[varId] ?? 0;
+  }
+
+  public getGlobalCap(varId: GlobalVarId): number {
+    return this.state.globalCaps[varId] ?? 0;
+  }
+
+  public getHoverInterfaceId(x: number, y: number): InterfaceId | null {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return null;
+    const ct = this.getCellTypeAt(x, y);
+    if (ct.hoverInterfaceId !== undefined) {
+      return ct.hoverInterfaceId;
+    }
+    return this.manifest.defaultHoverInterfaceId ?? null;
+  }
+
+  public getCellSnapshot(x: number, y: number): CellRuntimeSnapshot | null {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return null;
     const idx = y * this.width + x;
-    const result: Record<SupplyId, number> = {};
-    for (const [supplyId, buffer] of this.supplyBuffers.entries()) {
-      result[supplyId] = buffer[idx];
-    }
-    return result;
-  }
+    const ct = this.getCellTypeAt(x, y);
+    const visual = this.getCellVisualAt(x, y);
+    const stateObj = this.state.cellStates.get(idx);
 
-  public setCell(x: number, y: number, cellTypeId: CellTypeId): boolean {
-    if (!this.inBounds(x, y)) return false;
-    const typeIdx = this.cellIndexById.get(cellTypeId);
-    if (typeIdx === undefined) return false;
+    const visibleState = ct.stateSchema
+      .filter((f) => f.access !== 'private')
+      .map((f) => ({
+        key: f.key,
+        label: f.label ?? f.key,
+        type: f.type,
+        value: stateObj?.[f.key] ?? f.initialValue,
+        access: f.access,
+      }));
 
-    const flatIdx = y * this.width + x;
-    const def = this.cellTypeByIndex[typeIdx];
-    this.currentGrid[flatIdx] = typeIdx;
-    this.cellStates[flatIdx] = this.createCellInitialState(def);
-    return true;
-  }
+    const supplies = this.manifest.supplies.map((s) => ({
+      id: s.id,
+      name: s.name,
+      color: s.color,
+      amount: this.getSupplyAt(x, y, s.id),
+    }));
 
-  public countNeighbors(
-    x: number,
-    y: number,
-    cellTypeId: CellTypeId,
-    radius = 1,
-    neighborhood: 'moore' | 'vonNeumann' = 'moore'
-  ): number {
-    const targetIdx = this.cellIndexById.get(cellTypeId);
-    if (targetIdx === undefined) return 0;
-    let count = 0;
-    const w = this.width;
-    const h = this.height;
-
-    for (let dy = -radius; dy <= radius; dy++) {
-      const ny = y + dy;
-      if (ny < 0 || ny >= h) continue;
-      for (let dx = -radius; dx <= radius; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        if (neighborhood === 'vonNeumann' && Math.abs(dx) + Math.abs(dy) > radius) {
-          continue;
-        }
-        const nx = x + dx;
-        if (nx < 0 || nx >= w) continue;
-        if (this.currentGrid[ny * w + nx] === targetIdx) {
-          count++;
-        }
-      }
-    }
-    return count;
-  }
-
-  private reclaimFromCells(stateKey: string, amount: number): void {
-    let remaining = Math.max(0, Math.floor(amount));
-    if (remaining === 0) return;
-
-    for (let i = this.currentGrid.length - 1; i >= 0 && remaining > 0; i--) {
-      const st = this.cellStates[i];
-      if (!st) continue;
-      const cur = Number(st[stateKey] ?? 0);
-      if (cur <= 0) continue;
-      const take = Math.min(cur, remaining);
-      st[stateKey] = cur - take;
-      remaining -= take;
-    }
-  }
-
-  private createMutableWorld(): MutableRuleWorld {
-    return {
-      getResource: (id) => this.getResource(id),
-      addResource: (id, delta) => this.addResource(id, delta),
-      consumeResource: (id, amount) => this.consumeResource(id, amount),
-      setCell: (x, y, cellTypeId) => this.setCell(x, y, cellTypeId),
-      getCellStateAt: (x, y) => this.getCellStateAt(x, y),
-      patchCellState: (x, y, patch) => this.patchCellState(x, y, patch),
-      reclaimFromCells: (stateKey, amount) =>
-        this.reclaimFromCells(stateKey, amount),
-      reconcileResourceCaps: () => this.reconcileResourceCaps(),
-    };
-  }
-
-  public createEvalContext(
-    x: number,
-    y: number,
-    overrides?: Partial<RuleEvalContext>
-  ): RuleEvalContext {
-    const cellType = overrides?.cellType ?? this.getCellTypeAt(x, y);
     return {
       x,
       y,
-      cycle: this.cycleCount,
-      seed: this.seed,
-      cellType,
-      state: overrides?.state ?? this.getCellStateAt(x, y),
-      supplies: overrides?.supplies ?? this.getLocalSupplies(x, y),
-      resources: overrides?.resources ?? this.getResources(),
-      resourceCaps: overrides?.resourceCaps ?? this.getResourceCaps(),
-      manifest: this.manifest,
-      countNeighbors: (cx, cy, cid, r, nb) =>
-        this.countNeighbors(cx, cy, cid, r, nb),
+      cellType: ct,
+      visual,
+      visibleState,
+      supplies,
     };
   }
 
-  public generateNewMap(setup?: WorldSetupValues): void {
-    this.currentGrid.fill(this.defaultCellIndex);
-    this.cellStates.fill(null);
-    this.notifications = [];
-    this.cycleCount = 0;
-
-    for (const buffer of this.supplyBuffers.values()) {
-      buffer.fill(0);
-    }
-
-    for (const res of this.manifest.resources) {
-      this.resources[res.id] = res.initialValue;
-    }
-
-    const mutator: GridMutator = {
-      width: this.width,
-      height: this.height,
-      defaultCellTypeId: this.manifest.defaultCellTypeId,
-      clear: () => {
-        this.currentGrid.fill(this.defaultCellIndex);
-        this.cellStates.fill(null);
-      },
-      getCell: (x, y) => {
-        if (!this.inBounds(x, y)) return this.manifest.defaultCellTypeId;
-        return this.getCellTypeAt(x, y).id;
-      },
-      setCell: (x, y, cellTypeId) => {
-        this.setCell(x, y, cellTypeId);
-      },
-    };
-
-    const resolvedSetup: WorldSetupValues = setup ?? {
-      width: this.width,
-      height: this.height,
-      seed: this.seed,
-      params: {},
-    };
-    const rng = createSeededRng(resolvedSetup.seed);
-    runWorldGeneratorPipeline(
-      this.manifest.worldGenerator,
-      mutator,
-      resolvedSetup,
-      rng
-    );
-  }
-
-  public canAffordCost(cost: ResourceDelta | undefined): AffordabilityCheck {
-    if (!cost) return { ok: true, missing: [] };
-
-    const missing: AffordabilityCheck['missing'] = [];
-    for (const [resId, need] of Object.entries(cost)) {
-      if (need <= 0) continue;
-      const have = this.resources[resId] ?? 0;
-      if (have < need) {
-        const resDef = this.manifest.resources.find((r) => r.id === resId);
-        missing.push({
-          resourceId: resId,
-          resourceName: resDef?.name ?? resId,
-          need,
-          have,
-        });
-      }
-    }
-
-    return { ok: missing.length === 0, missing };
-  }
-
-  public canAfford(cellTypeId: CellTypeId): AffordabilityCheck {
-    const def = this.getCellTypeById(cellTypeId);
-    return this.canAffordCost(def?.buildCost);
-  }
-
-  private applyResourceDelta(
-    delta: ResourceDelta | undefined,
-    caps?: Record<ResourceId, number | null>
-  ): void {
-    if (!delta) return;
-    const effectiveCaps = caps ?? this.getResourceCaps();
-    for (const [resId, amount] of Object.entries(delta)) {
-      if (!amount) continue;
-      let next = (this.resources[resId] ?? 0) + amount;
-      const cap = effectiveCaps[resId];
-      if (cap !== null && cap !== undefined && next > cap) {
-        next = cap;
-      }
-      this.resources[resId] = next;
-    }
-  }
-
-  public buildCell(
+  public getUiTemplateContext(
     x: number,
     y: number,
-    cellTypeId: CellTypeId
-  ): { ok: boolean; reason?: string } {
-    if (!this.inBounds(x, y)) return { ok: false, reason: t('core.outOfBounds') };
-    const def = this.getCellTypeById(cellTypeId);
-    if (!def) return { ok: false, reason: t('core.unknownCell') };
-
-    const check = this.canAfford(cellTypeId);
-    if (!check.ok) {
-      return {
-        ok: false,
-        reason: t('core.insufficient', {
-          list: check.missing.map((m) => m.resourceName).join(', '),
-        }),
-      };
-    }
-
-    if (def.buildCost) {
-      for (const [resId, cost] of Object.entries(def.buildCost)) {
-        this.resources[resId] = (this.resources[resId] ?? 0) - cost;
-      }
-    }
-
-    this.setCell(x, y, cellTypeId);
-
-    if (def.onBuild && def.onBuild.length > 0) {
-      const ctx = this.createEvalContext(x, y, { cellType: def });
-      executeWorldRules(def.onBuild, ctx, this.createMutableWorld());
-    }
-
-    this.reconcileResourceCaps();
-    return { ok: true };
-  }
-
-  public demolishCell(x: number, y: number): { ok: boolean } {
-    if (!this.inBounds(x, y)) return { ok: false };
-    const current = this.getCellTypeAt(x, y);
-    const hasDemolish =
-      (current.onDemolish && current.onDemolish.length > 0) ||
-      (current.onClick?.right ?? []).some((r) =>
-        r.do.some((a) => a.type === 'openDemolishConfirm')
-      );
-    if (!hasDemolish) return { ok: false };
-
-    const prevState = this.getCellStateAt(x, y);
-    const targetCellId = current.demolishTo ?? this.manifest.defaultCellTypeId;
-    const ctx = this.createEvalContext(x, y, {
-      cellType: current,
-      state: prevState,
-    });
-
-    this.setCell(x, y, targetCellId);
-
-    if (current.onDemolish && current.onDemolish.length > 0) {
-      executeWorldRules(current.onDemolish, ctx, this.createMutableWorld());
-    }
-
-    this.reconcileResourceCaps();
-    this.clearNotificationsAt(x, y);
-    return { ok: true };
-  }
-
-  public getDemolishInfo(x: number, y: number): DemolishInfo {
-    if (!this.inBounds(x, y)) return { lines: [], warnings: [] };
-    const cellType = this.getCellTypeAt(x, y);
-    return deriveDemolishInfo(cellType, this.createEvalContext(x, y));
-  }
-
-  public getBuildPreview(
-    x: number,
-    y: number,
-    cellTypeId: CellTypeId
-  ): StatusBadge | null {
-    if (!this.inBounds(x, y)) return null;
-    const def = this.getCellTypeById(cellTypeId);
-    if (!def) return null;
-    return deriveBuildPreview(def, this.createEvalContext(x, y, { cellType: def }));
-  }
-
-  public resolveVisualAt(x: number, y: number): ResolvedVisualState {
-    const cellType = this.getCellTypeAt(x, y);
-    return resolveCellVisual(cellType, this.createEvalContext(x, y));
-  }
-
-  public transferPanelResource(
-    x: number,
-    y: number,
-    resourceId: ResourceId,
-    stateKey: string,
-    delta: number,
-    min: number,
-    max: number,
-    resetKeys?: string[],
-    clearNotifications?: boolean
-  ): boolean {
-    if (!this.inBounds(x, y) || delta === 0) return false;
-    const state = this.getCellStateAt(x, y);
-    const cur = Number(state[stateKey] ?? 0);
-    const next = cur + delta;
-    if (next < min || next > max) return false;
-
-    if (delta > 0) {
-      if (!this.consumeResource(resourceId, delta)) return false;
-    } else {
-      this.addResource(resourceId, Math.abs(delta));
-    }
-
-    const patch: CellStateData = { [stateKey]: next };
-    if (delta > 0 && resetKeys) {
-      for (const k of resetKeys) {
-        patch[k] = 0;
-      }
-    }
-    this.patchCellState(x, y, patch);
-    if (delta > 0 && clearNotifications) {
-      this.clearNotificationsAt(x, y);
-    }
-    this.reconcileResourceCaps();
-    return true;
-  }
-
-  public selectPanelResource(
-    x: number,
-    y: number,
-    stateKey: string,
-    resourceId: ResourceId
-  ): boolean {
-    if (!this.inBounds(x, y)) return false;
-    this.patchCellState(x, y, { [stateKey]: resourceId });
-    this.reconcileResourceCaps();
-    return true;
-  }
-
-  public executePanelAction(
-    x: number,
-    y: number,
-    cost: ResourceDelta | undefined,
-    actions: readonly Action[]
-  ): boolean {
-    if (!this.inBounds(x, y)) return false;
-    if (!this.canAffordCost(cost).ok) return false;
-
-    if (cost) {
-      for (const [resId, amt] of Object.entries(cost)) {
-        if (amt > 0) {
-          this.resources[resId] = (this.resources[resId] ?? 0) - amt;
-        }
-      }
-    }
-
-    const ctx = this.createEvalContext(x, y);
-    executeWorldRules([{ do: [...actions] }], ctx, this.createMutableWorld());
-    this.reconcileResourceCaps();
-    return true;
-  }
-
-  private applyEmission(
-    x: number,
-    y: number,
-    emission: SupplyEmission,
-    producedTotals?: Record<SupplyId, number>
-  ): void {
-    const buffer = this.supplyBuffers.get(emission.id);
-    const def = this.supplyDefsById.get(emission.id);
-    if (!buffer || !def) return;
-
-    const w = this.width;
-    const h = this.height;
-    const r = emission.radius;
-    const amount = emission.amount;
-    const maxCap = def.maxAmount;
-    const includeSelf = emission.includeSelf ?? true;
-
-    const deposit = (idx: number) => {
-      const prev = buffer[idx];
-      const next =
-        maxCap !== undefined ? Math.min(maxCap, prev + amount) : prev + amount;
-      buffer[idx] = next;
-      if (producedTotals && next > prev) {
-        producedTotals[emission.id] =
-          (producedTotals[emission.id] ?? 0) + (next - prev);
-      }
-    };
-
-    if (emission.neighborhood === 'self') {
-      deposit(y * w + x);
-      return;
-    }
-
-    for (let dy = -r; dy <= r; dy++) {
-      const ty = y + dy;
-      if (ty < 0 || ty >= h) continue;
-      for (let dx = -r; dx <= r; dx++) {
-        if (!includeSelf && dx === 0 && dy === 0) continue;
-        if (
-          emission.neighborhood === 'vonNeumann' &&
-          Math.abs(dx) + Math.abs(dy) > r
-        ) {
-          continue;
-        }
-        const tx = x + dx;
-        if (tx < 0 || tx >= w) continue;
-        deposit(ty * w + tx);
-      }
-    }
-  }
-
-  private getPrioritizedNonDefaultIndices(): number[] {
-    const indices: number[] = [];
-    const total = this.currentGrid.length;
-    for (let i = 0; i < total; i++) {
-      if (this.currentGrid[i] !== this.defaultCellIndex) {
-        indices.push(i);
-      }
-    }
-
-    indices.sort((a, b) => {
-      const defA = this.cellTypeByIndex[this.currentGrid[a]];
-      const defB = this.cellTypeByIndex[this.currentGrid[b]];
-      const prioA = defA.priorityByState
-        ? Number(this.cellStates[a]?.[defA.priorityByState] ?? 0)
-        : 0;
-      const prioB = defB.priorityByState
-        ? Number(this.cellStates[b]?.[defB.priorityByState] ?? 0)
-        : 0;
-      if (prioB !== prioA) return prioB - prioA;
-      return a - b;
-    });
-
-    return indices;
-  }
-
-  private fillLocalSupplies(
-    flatIdx: number,
-    supplyEntries: [SupplyId, Int16Array][],
-    out: Record<SupplyId, number>
-  ): void {
-    for (let s = 0; s < supplyEntries.length; s++) {
-      out[supplyEntries[s][0]] = supplyEntries[s][1][flatIdx];
-    }
-  }
-
-  public step(): StepResult {
-    const w = this.width;
-    const h = this.height;
-    const total = w * h;
-    const supplyEntries = Array.from(this.supplyBuffers.entries());
-    const localSupplies: Record<SupplyId, number> = {};
-
-    const producedResourcesDelta: ResourceDelta = {};
-    const consumedResourcesDelta: ResourceDelta = {};
-    const consumedTotals: Record<SupplyId, number> = {};
-    const producedTotals: Record<SupplyId, number> = {};
-    const nextNotifications: CellNotification[] = [];
-    const lostCells: {
-      x: number;
-      y: number;
-      cellType: CellTypeManifest;
-      state: CellStateData;
-    }[] = [];
-
-    for (const supply of this.manifest.supplies) {
-      consumedTotals[supply.id] = 0;
-      producedTotals[supply.id] = 0;
-    }
-
-    this.pendingEmissions.fill([]);
-    this.nextGrid.fill(this.defaultCellIndex);
-    this.nextCellStates.fill(null);
-
-    const nextCycleNumber = this.cycleCount + 1;
-    const availableResources: Record<ResourceId, number> = {
-      ...this.resources,
-    };
-    const initialCaps = this.getResourceCaps();
-
-    // ------------------------------------------------------------------
-    // PHASE 1: Consume, React & Transition
-    // ------------------------------------------------------------------
-    const evalIndices = this.getPrioritizedNonDefaultIndices();
-    const evaluatedFlags = new Uint8Array(total);
-
-    for (let k = 0; k < evalIndices.length; k++) {
-      const i = evalIndices[k];
-      evaluatedFlags[i] = 1;
-      const x = i % w;
-      const y = (i - x) / w;
-
-      this.fillLocalSupplies(i, supplyEntries, localSupplies);
-
-      const currentType = this.cellTypeByIndex[this.currentGrid[i]];
-      const currentState = this.cellStates[i] ?? {};
-      const outcome = evaluateCycleRules(
-        currentType,
-        this.createEvalContext(x, y, {
-          cellType: currentType,
-          state: currentState,
-          supplies: localSupplies,
-          resources: availableResources,
-          resourceCaps: initialCaps,
-        })
-      );
-
-      for (const [supplyId, reqAmount] of Object.entries(
-        outcome.consumedSupplies
-      )) {
-        if (reqAmount <= 0) continue;
-        const buf = this.supplyBuffers.get(supplyId);
-        if (!buf) continue;
-        const actual = Math.min(buf[i], reqAmount);
-        if (actual > 0) {
-          buf[i] -= actual;
-          consumedTotals[supplyId] = (consumedTotals[supplyId] ?? 0) + actual;
-        }
-      }
-
-      for (const [resId, reqAmount] of Object.entries(
-        outcome.consumedResources
-      )) {
-        if (reqAmount <= 0) continue;
-        const currentAvail = availableResources[resId] ?? 0;
-        const actual = Math.min(currentAvail, reqAmount);
-        if (actual > 0) {
-          availableResources[resId] = currentAvail - actual;
-          consumedResourcesDelta[resId] =
-            (consumedResourcesDelta[resId] ?? 0) + actual;
-        }
-      }
-
-      const nextIdx = this.cellIndexById.get(outcome.nextTypeId);
-      const resolvedNextIdx =
-        nextIdx !== undefined ? nextIdx : this.currentGrid[i];
-      this.nextGrid[i] = resolvedNextIdx;
-
-      if (resolvedNextIdx !== this.currentGrid[i]) {
-        this.pendingEmissions[i] = [];
-        const nextDef = this.cellTypeByIndex[resolvedNextIdx];
-        this.nextCellStates[i] = this.createCellInitialState(nextDef);
-        lostCells.push({
-          x,
-          y,
-          cellType: currentType,
-          state: { ...currentState },
-        });
-      } else {
-        this.nextCellStates[i] = outcome.nextState
-          ? { ...outcome.nextState }
-          : null;
-        this.pendingEmissions[i] = outcome.emissions;
-        addDelta(producedResourcesDelta, outcome.producedResources);
-      }
-
-      if (outcome.notification) {
-        nextNotifications.push({
-          id: `notif-${nextCycleNumber}-${x}-${y}-${currentType.id}`,
-          x,
-          y,
-          cellTypeId: currentType.id,
-          cycle: nextCycleNumber,
-          ...outcome.notification,
-        });
-      }
-    }
-
-    // Evaluate default (empty) cells only if default type has onCycle rules
-    const defaultDef = this.cellTypeByIndex[this.defaultCellIndex];
-    if (defaultDef.onCycle && defaultDef.onCycle.length > 0) {
-      for (let i = 0; i < total; i++) {
-        if (evaluatedFlags[i] === 1) continue;
-        const x = i % w;
-        const y = (i - x) / w;
-        this.fillLocalSupplies(i, supplyEntries, localSupplies);
-        const outcome = evaluateCycleRules(
-          defaultDef,
-          this.createEvalContext(x, y, {
-            cellType: defaultDef,
-            state: {},
-            supplies: localSupplies,
-            resources: availableResources,
-            resourceCaps: initialCaps,
-          })
-        );
-        const nextIdx = this.cellIndexById.get(outcome.nextTypeId);
-        if (nextIdx !== undefined && nextIdx !== this.defaultCellIndex) {
-          this.nextGrid[i] = nextIdx;
-          const nextDef = this.cellTypeByIndex[nextIdx];
-          this.nextCellStates[i] = this.createCellInitialState(nextDef);
-        } else if (outcome.emissions.length > 0) {
-          this.pendingEmissions[i] = outcome.emissions;
-        }
-      }
-    }
-
-    // Swap grids first so caps reflect surviving cells
-    const prevGrid = this.currentGrid;
-    this.currentGrid = this.nextGrid;
-    this.nextGrid = prevGrid;
-
-    const prevStates = this.cellStates;
-    this.cellStates = this.nextCellStates;
-    this.nextCellStates = prevStates;
-
-    for (const [resId, used] of Object.entries(consumedResourcesDelta)) {
-      if (used) {
-        this.resources[resId] = (this.resources[resId] ?? 0) - used;
-      }
-    }
-
-    // Execute declarative onLost rules for cells transformed/removed during cycle
-    if (lostCells.length > 0) {
-      const world = this.createMutableWorld();
-      for (const lost of lostCells) {
-        if (lost.cellType.onLost && lost.cellType.onLost.length > 0) {
-          executeWorldRules(
-            lost.cellType.onLost,
-            this.createEvalContext(lost.x, lost.y, {
-              cellType: lost.cellType,
-              state: lost.state,
-            }),
-            world
-          );
-        }
-      }
-    }
-
-    this.reconcileResourceCaps();
-
-    // ------------------------------------------------------------------
-    // PHASE 2: Decay unconsumed supply remainders & optional decaying resources
-    // ------------------------------------------------------------------
-    for (const [supplyId, buffer] of this.supplyBuffers.entries()) {
-      const def = this.supplyDefsById.get(supplyId);
-      if (!def) continue;
-      const rule = def.decay;
-      for (let i = 0; i < total; i++) {
-        const val = buffer[i];
-        if (val <= 0) continue;
-        buffer[i] = applyDecayRule(val, rule);
-      }
-    }
-
-    for (const res of this.manifest.resources) {
-      if (!res.decay) continue;
-      const currentVal = this.resources[res.id] ?? 0;
-      if (currentVal > 0) {
-        this.resources[res.id] = applyDecayRule(currentVal, res.decay);
-      }
-    }
-
-    // ------------------------------------------------------------------
-    // PHASE 3: Produce fresh spatial supplies & next-cycle global resources
-    // ------------------------------------------------------------------
-    for (let y = 0; y < h; y++) {
-      const rowOffset = y * w;
-      for (let x = 0; x < w; x++) {
-        const idx = rowOffset + x;
-        const emissions = this.pendingEmissions[idx];
-        if (!emissions || emissions.length === 0) continue;
-        for (let e = 0; e < emissions.length; e++) {
-          this.applyEmission(x, y, emissions[e], producedTotals);
-        }
-      }
-    }
-
-    this.applyResourceDelta(producedResourcesDelta, this.getResourceCaps());
-
-    this.cycleCount = nextCycleNumber;
-    this.notifications = nextNotifications;
-
+    params: Record<string, unknown> = {}
+  ): UiTemplateContext {
+    const ct = this.getCellTypeAt(x, y);
     return {
-      cycle: this.cycleCount,
-      producedResourcesDelta,
-      consumedResourcesDelta,
-      lostCellsCount: lostCells.length,
-      consumedTotals,
-      producedTotals,
-      notifications: [...this.notifications],
+      cellName: ct.name,
+      cellTypeId: ct.id,
+      getState: (key) => this.readCellStateInternal(this.state, x, y, key, 'interface'),
+      getGlobal: (varId) => this.readGlobalInternal(this.state, varId, 'interface'),
+      getGlobalCap: (varId) => this.readGlobalCapInternal(this.state, varId, 'interface'),
+      getGlobalVarName: (varId) => this.globalVarById.get(varId)?.name ?? varId,
+      getSupply: (supplyId) => this.getSupplyAt(x, y, supplyId),
+      getSetup: (paramId) => this.setupValues[paramId] ?? 0,
+      params,
     };
   }
+
+  // ── Game Lifecycle ───────────────────────────────────────────────────────
+
+  public createNewGame(options?: {
+    width?: number;
+    height?: number;
+    seed?: string;
+    setupParams?: Record<string, RuntimeValue>;
+  }): void {
+    this.width = options?.width ?? this.manifest.defaultGridSize.width;
+    this.height = options?.height ?? this.manifest.defaultGridSize.height;
+    this.seed = options?.seed?.trim() || generateRandomSeed();
+
+    this.setupValues = {
+      width: this.width,
+      height: this.height,
+      seed: this.seed,
+    };
+    for (const opt of this.manifest.setupOptions ?? []) {
+      this.setupValues[opt.id] = options?.setupParams?.[opt.id] ?? opt.defaultValue;
+    }
+
+    this.rng = createSeededRng(`${this.seed}:sim`);
+    this.pendingContinuation = null;
+    this.state = this.createEmptyState(this.width, this.height);
+
+    const defaultCellIndex = this.cellIndexById.get(this.manifest.defaultCellTypeId) ?? 0;
+    runWorldGeneratorGraph(this.manifest.worldGenerator, this.state.grid, {
+      width: this.width,
+      height: this.height,
+      seed: this.seed,
+      setupValues: this.setupValues,
+      cellIndexById: this.cellIndexById,
+      defaultCellIndex,
+    });
+
+    // Initialize per-cell states & visuals from each cell type's defaults
+    const size = this.width * this.height;
+    for (let i = 0; i < size; i++) {
+      const ct = this.cellTypes[this.state.grid[i]];
+      this.initCellDefaults(this.state, i, ct);
+    }
+
+    // Run GlobalState On World Start
+    const host = this.createHost(this.state, {
+      immediateEmit: true,
+      immediateTransform: true,
+    });
+    executeGraphEntry(
+      this.compiledGlobalGraph,
+      'event.worldStart',
+      'out',
+      { scope: 'global', cycle: 0 },
+      host
+    );
+
+    // Run initial Supply phase pass so emitters (e.g. Water -> Moisture) show on Cycle 0
+    this.runSupplyPhaseOnly(this.state);
+    this.bumpVersion();
+  }
+
+  // ── 4-Phase Simulation Step ──────────────────────────────────────────────
+
+  public step(): void {
+    this.pendingContinuation = null;
+    this.executeStepOnState(this.state, false);
+    this.bumpVersion();
+  }
+
+  private executeStepOnState(
+    target: CoreMutableState,
+    trackBreakdown: boolean
+  ): { breakdown: Record<GlobalVarId, ResourceBreakdown> } {
+    const breakdown: Record<GlobalVarId, ResourceBreakdown> = {};
+    if (trackBreakdown) {
+      for (const v of this.manifest.globalState.variables) {
+        if (v.type === 'number') {
+          breakdown[v.id] = { gained: 0, consumed: 0 };
+        }
+      }
+    }
+
+    const nextCycle = target.cycle + 1;
+    target.cycle = nextCycle;
+
+    // ── Phase 1: Decay (Supplies + Decaying Global Variables) ──────────────
+    for (const supply of this.manifest.supplies) {
+      const buf = target.supplies.get(supply.id);
+      if (!buf) continue;
+      if (supply.decay.kind === 'clear') {
+        buf.fill(0);
+      } else if (supply.decay.kind !== 'none') {
+        for (let i = 0; i < buf.length; i++) {
+          if (buf[i] > 0) {
+            buf[i] = applyDecayRule(buf[i], supply.decay);
+          }
+        }
+      }
+    }
+
+    for (const v of this.manifest.globalState.variables) {
+      if (v.type === 'number' && v.decay && v.decay.kind !== 'none') {
+        const cur = Number(target.globalValues[v.id] ?? 0);
+        if (cur > 0) {
+          const decayed = applyDecayRule(cur, v.decay);
+          const loss = cur - decayed;
+          target.globalValues[v.id] = decayed;
+          if (trackBreakdown && loss > 0) {
+            breakdown[v.id].consumed += loss;
+          }
+        }
+      }
+    }
+
+    // ── Phase 2: Supply Distribution (Simultaneous Buffering) ──────────────
+    const phase2Emissions = this.createSupplyBufferMap(this.width * this.height);
+    const phase2Host = this.createHost(target, {
+      immediateEmit: false,
+      emitStaging: phase2Emissions,
+      immediateTransform: false,
+      breakdown: trackBreakdown ? breakdown : undefined,
+    });
+
+    executeGraphEntry(
+      this.compiledGlobalGraph,
+      'event.worldCycle',
+      'supply',
+      { scope: 'global', cycle: nextCycle },
+      phase2Host
+    );
+
+    const size = this.width * this.height;
+    for (let i = 0; i < size; i++) {
+      const ct = this.cellTypes[target.grid[i]];
+      const compiled = this.compiledCellGraphs.get(ct.id);
+      if (!compiled || !compiled.entriesByType.has('event.cycle')) continue;
+      const x = i % this.width;
+      const y = Math.floor(i / this.width);
+      executeGraphEntry(
+        compiled,
+        'event.cycle',
+        'supply',
+        {
+          scope: 'cell',
+          cycle: nextCycle,
+          x,
+          y,
+          cellTypeId: ct.id,
+          cellTypeName: ct.name,
+        },
+        phase2Host
+      );
+    }
+
+    this.flushSupplyStaging(target, phase2Emissions);
+
+    // ── Phase 3: Production (GlobalState + Cells) ──────────────────────────
+    const phase3Transforms: PendingTransform[] = [];
+    const phase3Host = this.createHost(target, {
+      immediateEmit: true,
+      immediateTransform: false,
+      transformQueue: phase3Transforms,
+      breakdown: trackBreakdown ? breakdown : undefined,
+    });
+
+    executeGraphEntry(
+      this.compiledGlobalGraph,
+      'event.worldCycle',
+      'produce',
+      { scope: 'global', cycle: nextCycle },
+      phase3Host
+    );
+
+    for (let i = 0; i < size; i++) {
+      const ct = this.cellTypes[target.grid[i]];
+      const compiled = this.compiledCellGraphs.get(ct.id);
+      if (!compiled || !compiled.entriesByType.has('event.cycle')) continue;
+      const x = i % this.width;
+      const y = Math.floor(i / this.width);
+      executeGraphEntry(
+        compiled,
+        'event.cycle',
+        'produce',
+        {
+          scope: 'cell',
+          cycle: nextCycle,
+          x,
+          y,
+          cellTypeId: ct.id,
+          cellTypeName: ct.name,
+        },
+        phase3Host
+      );
+    }
+
+    // ── Phase 4: Consumption & Reactions (Prioritized) ─────────────────────
+    // Refresh notifications fresh for this cycle
+    target.notifications = [];
+
+    const phase4Transforms: PendingTransform[] = [...phase3Transforms];
+    const phase4Host = this.createHost(target, {
+      immediateEmit: true,
+      immediateTransform: false,
+      transformQueue: phase4Transforms,
+      breakdown: trackBreakdown ? breakdown : undefined,
+    });
+
+    executeGraphEntry(
+      this.compiledGlobalGraph,
+      'event.worldCycle',
+      'react',
+      { scope: 'global', cycle: nextCycle },
+      phase4Host
+    );
+
+    // Build prioritized execution order for cells with event.cycle
+    const reactOrder: { idx: number; priority: number }[] = [];
+    for (let i = 0; i < size; i++) {
+      const ct = this.cellTypes[target.grid[i]];
+      const compiled = this.compiledCellGraphs.get(ct.id);
+      if (!compiled || !compiled.entriesByType.has('event.cycle')) continue;
+      let priority = 0;
+      if (ct.priorityByState) {
+        const st = target.cellStates.get(i);
+        const raw = st?.[ct.priorityByState];
+        priority = typeof raw === 'number' ? raw : 0;
+      }
+      reactOrder.push({ idx: i, priority });
+    }
+    reactOrder.sort((a, b) => b.priority - a.priority || a.idx - b.idx);
+
+    for (const item of reactOrder) {
+      const i = item.idx;
+      const ct = this.cellTypes[target.grid[i]];
+      const compiled = this.compiledCellGraphs.get(ct.id)!;
+      const x = i % this.width;
+      const y = Math.floor(i / this.width);
+      executeGraphEntry(
+        compiled,
+        'event.cycle',
+        'react',
+        {
+          scope: 'cell',
+          cycle: nextCycle,
+          x,
+          y,
+          cellTypeId: ct.id,
+          cellTypeName: ct.name,
+        },
+        phase4Host
+      );
+    }
+
+    // Commit queued cell transformations (onExit -> replace -> onEnter)
+    for (const tr of phase4Transforms) {
+      this.applyTransformInternal(
+        target,
+        tr.x,
+        tr.y,
+        tr.toId,
+        tr.reason,
+        trackBreakdown ? breakdown : undefined
+      );
+    }
+
+    return { breakdown };
+  }
+
+  private runSupplyPhaseOnly(target: CoreMutableState): void {
+    const staging = this.createSupplyBufferMap(this.width * this.height);
+    const host = this.createHost(target, {
+      immediateEmit: false,
+      emitStaging: staging,
+      immediateTransform: false,
+    });
+
+    executeGraphEntry(
+      this.compiledGlobalGraph,
+      'event.worldCycle',
+      'supply',
+      { scope: 'global', cycle: target.cycle },
+      host
+    );
+
+    const size = this.width * this.height;
+    for (let i = 0; i < size; i++) {
+      const ct = this.cellTypes[target.grid[i]];
+      const compiled = this.compiledCellGraphs.get(ct.id);
+      if (!compiled || !compiled.entriesByType.has('event.cycle')) continue;
+      executeGraphEntry(
+        compiled,
+        'event.cycle',
+        'supply',
+        {
+          scope: 'cell',
+          cycle: target.cycle,
+          x: i % this.width,
+          y: Math.floor(i / this.width),
+          cellTypeId: ct.id,
+          cellTypeName: ct.name,
+        },
+        host
+      );
+    }
+
+    this.flushSupplyStaging(target, staging);
+  }
+
+  // ── Player Interaction & Interface Continuations ─────────────────────────
 
   public handleCellClick(
     x: number,
     y: number,
-    button: MouseButton
-  ): ClickExecutionResult {
-    if (!this.inBounds(x, y)) return { uiAction: null, mutated: false };
-    const cellType = this.getCellTypeAt(x, y);
-    const rules =
-      button === 'left'
-        ? cellType.onClick?.left
-        : button === 'right'
-          ? cellType.onClick?.right
-          : undefined;
-    if (!rules || rules.length === 0) {
-      return { uiAction: null, mutated: false };
+    button: 'left' | 'right'
+  ): InteractionResult {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) {
+      return { mutated: false };
     }
-    const result = executeWorldRules(
-      rules,
-      this.createEvalContext(x, y),
-      this.createMutableWorld()
+    this.pendingContinuation = null;
+
+    const ct = this.getCellTypeAt(x, y);
+    const compiled = this.compiledCellGraphs.get(ct.id);
+    if (!compiled) return { mutated: false };
+
+    const host = this.createHost(this.state, {
+      immediateEmit: true,
+      immediateTransform: true,
+    });
+
+    const res = executeGraphEntry(
+      compiled,
+      'event.click',
+      button,
+      {
+        scope: 'cell',
+        cycle: this.state.cycle,
+        x,
+        y,
+        cellTypeId: ct.id,
+        cellTypeName: ct.name,
+      },
+      host
     );
-    if (result.mutated) {
-      this.reconcileResourceCaps();
-    }
-    return result;
+
+    return this.finalizeInteraction(res, compiled, 'cell', x, y, ct.id, ct.name);
   }
 
-  public getEmissionPreviewCoords(
+  public resolveActiveInterface(result: RuntimeValue): InteractionResult {
+    const cont = this.pendingContinuation;
+    this.pendingContinuation = null;
+    if (!cont) return { mutated: false, closeInterface: true };
+
+    const host = this.createHost(this.state, {
+      immediateEmit: true,
+      immediateTransform: true,
+    });
+
+    const res = resumeGraphFromInterface(
+      cont.compiled,
+      cont.nodeId,
+      'result',
+      result,
+      {
+        scope: cont.scope,
+        cycle: this.state.cycle,
+        x: cont.cellX,
+        y: cont.cellY,
+        cellTypeId: cont.cellTypeId,
+        cellTypeName: cont.cellTypeName,
+      },
+      host
+    );
+
+    return this.finalizeInteraction(
+      res,
+      cont.compiled,
+      cont.scope,
+      cont.cellX,
+      cont.cellY,
+      cont.cellTypeId,
+      cont.cellTypeName
+    );
+  }
+
+  public cancelActiveInterface(): InteractionResult {
+    const cont = this.pendingContinuation;
+    this.pendingContinuation = null;
+    if (!cont) return { mutated: false, closeInterface: true };
+
+    const host = this.createHost(this.state, {
+      immediateEmit: true,
+      immediateTransform: true,
+    });
+
+    const res = resumeGraphFromInterface(
+      cont.compiled,
+      cont.nodeId,
+      'cancel',
+      undefined,
+      {
+        scope: cont.scope,
+        cycle: this.state.cycle,
+        x: cont.cellX,
+        y: cont.cellY,
+        cellTypeId: cont.cellTypeId,
+        cellTypeName: cont.cellTypeName,
+      },
+      host
+    );
+
+    return this.finalizeInteraction(
+      res,
+      cont.compiled,
+      cont.scope,
+      cont.cellX,
+      cont.cellY,
+      cont.cellTypeId,
+      cont.cellTypeName
+    );
+  }
+
+  public triggerInterfaceAction(
+    interfaceId: InterfaceId,
+    actionId: string,
+    cellX: number,
+    cellY: number,
+    params: Record<string, unknown>,
+    value?: RuntimeValue
+  ): InteractionResult {
+    const compiled = this.compiledInterfaceGraphs.get(interfaceId);
+    if (!compiled) return { mutated: false };
+
+    const ct = this.getCellTypeAt(cellX, cellY);
+    const host = this.createHost(this.state, {
+      immediateEmit: true,
+      immediateTransform: true,
+    });
+
+    const res = executeGraphEntry(
+      compiled,
+      'event.uiAction',
+      'out',
+      {
+        scope: 'interface',
+        cycle: this.state.cycle,
+        x: cellX,
+        y: cellY,
+        cellTypeId: ct.id,
+        cellTypeName: ct.name,
+        eventData: value !== undefined ? { value } : {},
+        uiParams: params,
+      },
+      host,
+      actionId
+    );
+
+    if (res.mutated) {
+      this.bumpVersion();
+    }
+
+    if (res.closedInterface) {
+      if (this.pendingContinuation) {
+        if (res.closedInterface.hasResult && res.closedInterface.result !== undefined) {
+          const contRes = this.resolveActiveInterface(res.closedInterface.result);
+          return {
+            mutated: res.mutated || contRes.mutated,
+            uiRequest: contRes.uiRequest,
+            closeInterface: !contRes.uiRequest,
+          };
+        } else {
+          const contRes = this.cancelActiveInterface();
+          return {
+            mutated: res.mutated || contRes.mutated,
+            uiRequest: contRes.uiRequest,
+            closeInterface: !contRes.uiRequest,
+          };
+        }
+      }
+      return { mutated: res.mutated, closeInterface: true };
+    }
+
+    if (res.pausedOpenInterface) {
+      this.pendingContinuation = {
+        compiled,
+        scope: 'interface',
+        nodeId: res.pausedOpenInterface.nodeId,
+        cellX,
+        cellY,
+        cellTypeId: ct.id,
+        cellTypeName: ct.name,
+        request: res.pausedOpenInterface.request,
+      };
+      return {
+        mutated: res.mutated,
+        uiRequest: res.pausedOpenInterface.request,
+      };
+    }
+
+    return { mutated: res.mutated };
+  }
+
+  private finalizeInteraction(
+    res: GraphExecutionResult,
+    compiled: CompiledGraph,
+    scope: GraphScope,
+    cellX: number,
+    cellY: number,
+    cellTypeId: CellTypeId,
+    cellTypeName: string
+  ): InteractionResult {
+    if (res.mutated) {
+      this.bumpVersion();
+    }
+    if (res.pausedOpenInterface) {
+      this.pendingContinuation = {
+        compiled,
+        scope,
+        nodeId: res.pausedOpenInterface.nodeId,
+        cellX,
+        cellY,
+        cellTypeId,
+        cellTypeName,
+        request: res.pausedOpenInterface.request,
+      };
+      return {
+        mutated: res.mutated,
+        uiRequest: res.pausedOpenInterface.request,
+      };
+    }
+    return { mutated: res.mutated, closeInterface: true };
+  }
+
+  // ── Direct Transformation (Public API & Tests) ───────────────────────────
+
+  public transformCell(
     x: number,
     y: number,
-    cellTypeId: CellTypeId
-  ): GridCoordinate[] {
-    if (!this.inBounds(x, y)) return [];
-    const cellType = this.getCellTypeById(cellTypeId);
-    if (!cellType) return [];
-    const emissions = extractStaticEmissions(cellType);
-    if (emissions.length === 0) return [];
-
-    const seen = new Set<number>();
-    const coords: GridCoordinate[] = [];
-
-    for (const emission of emissions) {
-      const r = emission.radius;
-      const includeSelf = emission.includeSelf ?? true;
-      if (emission.neighborhood === 'self') {
-        const key = y * this.width + x;
-        if (!seen.has(key)) {
-          seen.add(key);
-          coords.push({ x, y });
-        }
-        continue;
-      }
-
-      for (let dy = -r; dy <= r; dy++) {
-        const ty = y + dy;
-        if (ty < 0 || ty >= this.height) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          if (!includeSelf && dx === 0 && dy === 0) continue;
-          if (
-            emission.neighborhood === 'vonNeumann' &&
-            Math.abs(dx) + Math.abs(dy) > r
-          ) {
-            continue;
-          }
-          const tx = x + dx;
-          if (tx < 0 || tx >= this.width) continue;
-          const key = ty * this.width + tx;
-          if (!seen.has(key)) {
-            seen.add(key);
-            coords.push({ x: tx, y: ty });
-          }
-        }
-      }
-    }
-
-    return coords;
+    toId: CellTypeId,
+    reason = ''
+  ): boolean {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return false;
+    const ok = this.applyTransformInternal(this.state, x, y, toId, reason);
+    if (ok) this.bumpVersion();
+    return ok;
   }
 
-  private getProjectedResourcesForCell(
-    targetFlatIdx: number,
-    resourceCaps: Record<ResourceId, number | null>
-  ): Record<ResourceId, number> {
-    const simResources: Record<ResourceId, number> = { ...this.resources };
-    if (this.currentGrid[targetFlatIdx] === this.defaultCellIndex) {
-      return simResources;
-    }
+  private applyTransformInternal(
+    target: CoreMutableState,
+    x: number,
+    y: number,
+    toId: CellTypeId,
+    reason: string,
+    breakdown?: Record<GlobalVarId, ResourceBreakdown>
+  ): boolean {
+    const toIndex = this.cellIndexById.get(toId);
+    if (toIndex === undefined) return false;
+    if (this.transformDepth >= MAX_TRANSFORM_DEPTH) return false;
 
-    const supplyEntries = Array.from(this.supplyBuffers.entries());
-    const localSupplies: Record<SupplyId, number> = {};
-    const evalIndices = this.getPrioritizedNonDefaultIndices();
-    const w = this.width;
+    const idx = y * this.width + x;
+    const oldIndex = target.grid[idx];
+    const oldType = this.cellTypes[oldIndex];
+    const newType = this.cellTypes[toIndex];
 
-    for (let k = 0; k < evalIndices.length; k++) {
-      const i = evalIndices[k];
-      if (i === targetFlatIdx) break;
+    this.transformDepth++;
+    try {
+      // 1. Run On Exit on old cell type (while old cell state is still intact!)
+      const exitHost = this.createHost(target, {
+        immediateEmit: true,
+        immediateTransform: true,
+        breakdown,
+      });
+      const oldCompiled = this.compiledCellGraphs.get(oldType.id);
+      if (oldCompiled) {
+        executeGraphEntry(
+          oldCompiled,
+          'event.exit',
+          'out',
+          {
+            scope: 'cell',
+            cycle: target.cycle,
+            x,
+            y,
+            cellTypeId: oldType.id,
+            cellTypeName: oldType.name,
+            eventData: { from: oldType.id, to: newType.id, reason },
+          },
+          exitHost
+        );
+      }
 
-      const x = i % w;
-      const y = (i - x) / w;
-      this.fillLocalSupplies(i, supplyEntries, localSupplies);
-      const cellType = this.cellTypeByIndex[this.currentGrid[i]];
-      const outcome = evaluateCycleRules(
-        cellType,
-        this.createEvalContext(x, y, {
-          cellType,
-          state: this.cellStates[i] ?? {},
-          supplies: localSupplies,
-          resources: simResources,
-          resourceCaps,
-        })
+      // 2. Replace cell on grid, clear old cell notifications, reset state & visuals
+      target.grid[idx] = toIndex;
+      target.notifications = target.notifications.filter(
+        (n) => !(n.scope === 'cell' && n.x === x && n.y === y)
       );
+      this.initCellDefaults(target, idx, newType);
 
-      for (const [resId, req] of Object.entries(outcome.consumedResources)) {
-        if (req <= 0) continue;
-        const avail = simResources[resId] ?? 0;
-        simResources[resId] = Math.max(0, avail - Math.min(avail, req));
+      // 3. Run On Enter on new cell type
+      const newCompiled = this.compiledCellGraphs.get(newType.id);
+      if (newCompiled) {
+        executeGraphEntry(
+          newCompiled,
+          'event.enter',
+          'out',
+          {
+            scope: 'cell',
+            cycle: target.cycle,
+            x,
+            y,
+            cellTypeId: newType.id,
+            cellTypeName: newType.name,
+            eventData: { from: oldType.id, to: newType.id, reason },
+          },
+          exitHost
+        );
+      }
+      return true;
+    } finally {
+      this.transformDepth--;
+    }
+  }
+
+  // ── Stats & Dry-Run Cycle Preview ────────────────────────────────────────
+
+  public getStats(): SimulationStats {
+    if (this.cachedStats && this.cachedStatsVersion === this.stateVersion) {
+      return this.cachedStats;
+    }
+
+    const cellCounts: Record<CellTypeId, number> = {};
+    for (const ct of this.cellTypes) {
+      cellCounts[ct.id] = 0;
+    }
+    for (let i = 0; i < this.state.grid.length; i++) {
+      const ct = this.cellTypes[this.state.grid[i]];
+      if (ct) cellCounts[ct.id]++;
+    }
+
+    // Clone current state and run 1 virtual 4-phase cycle for accurate HUD preview
+    const virtualState = this.cloneState(this.state);
+    const { breakdown } = this.executeStepOnState(virtualState, true);
+
+    const projectedDelta: Record<GlobalVarId, number> = {};
+    for (const v of this.manifest.globalState.variables) {
+      if (v.type === 'number') {
+        const before = Number(this.state.globalValues[v.id] ?? 0);
+        const after = Number(virtualState.globalValues[v.id] ?? 0);
+        projectedDelta[v.id] = after - before;
       }
     }
 
-    return simResources;
+    this.cachedStats = {
+      cycle: this.state.cycle,
+      globalValues: { ...this.state.globalValues },
+      globalCaps: { ...this.state.globalCaps },
+      projectedDelta,
+      projectedBreakdown: breakdown,
+      cellCounts,
+    };
+    this.cachedStatsVersion = this.stateVersion;
+    return this.cachedStats;
   }
 
-  public inspectCell(x: number, y: number): CellInspection | null {
-    if (!this.inBounds(x, y)) return null;
-    const flatIdx = y * this.width + x;
-    const cellType = this.getCellTypeAt(x, y);
-    const state = this.getCellStateAt(x, y);
-    const supplies = this.getLocalSupplies(x, y);
-    const resourceCaps = this.getResourceCaps();
-    const availResources = this.getProjectedResourcesForCell(
-      flatIdx,
-      resourceCaps
-    );
+  // ── Serialization (v4) ───────────────────────────────────────────────────
 
-    const badgeCtx = this.createEvalContext(x, y, {
-      cellType,
-      state,
-      supplies,
-      resourceCaps,
-    });
-    const statusBadge = resolveCellBadge(cellType, badgeCtx);
+  public serialize(): SerializedSimulationState {
+    const gridIds: CellTypeId[] = new Array(this.state.grid.length);
+    for (let i = 0; i < this.state.grid.length; i++) {
+      gridIds[i] = this.cellTypes[this.state.grid[i]]?.id ?? this.manifest.defaultCellTypeId;
+    }
 
-    const cycleCtx = this.createEvalContext(x, y, {
-      cellType,
-      state,
-      supplies,
-      resources: availResources,
-      resourceCaps,
-    });
-    const outcome = evaluateCycleRules(cellType, cycleCtx);
-    const nextCellType = this.getCellTypeById(outcome.nextTypeId) ?? cellType;
-    const explanation = deriveCycleExplanation(cellType, cycleCtx, outcome);
+    const cellStates: Record<string, Record<string, RuntimeValue>> = {};
+    for (const [idx, st] of this.state.cellStates.entries()) {
+      if (Object.keys(st).length > 0) {
+        cellStates[String(idx)] = { ...st };
+      }
+    }
+
+    const cellVisuals: Record<string, CellVisualState> = {};
+    for (const [idx, vis] of this.state.cellVisuals.entries()) {
+      cellVisuals[String(idx)] = { ...vis };
+    }
+
+    const supplies: Record<SupplyId, number[]> = {};
+    for (const [sid, buf] of this.state.supplies.entries()) {
+      supplies[sid] = Array.from(buf);
+    }
 
     return {
-      x,
-      y,
-      cellType,
-      state,
+      version: 4,
+      rulesetId: this.manifest.id,
+      width: this.width,
+      height: this.height,
+      cycle: this.state.cycle,
+      seed: this.seed,
+      setupValues: { ...this.setupValues },
+      grid: gridIds,
+      cellStates,
+      cellVisuals,
+      globalValues: { ...this.state.globalValues },
+      globalCaps: { ...this.state.globalCaps },
       supplies,
-      nextCellType,
-      willChange: nextCellType.id !== cellType.id,
-      transitionLabel: explanation.transitionLabel,
-      transitionTone: explanation.transitionTone,
-      statusBadge,
+      notifications: this.state.notifications.map((n) => ({ ...n })),
     };
   }
 
-  public getStats(): SimulationStats {
-    const counts: Record<CellTypeId, number> = {};
-    for (const def of this.cellTypeByIndex) {
-      counts[def.id] = 0;
+  public deserialize(snapshot: SerializedSimulationState): void {
+    if (snapshot.version !== 4) {
+      throw new Error(`Unsupported save version ${String(snapshot.version)}`);
     }
 
-    const projectedBreakdown: Record<ResourceId, ResourceProjectionBreakdown> =
-      {};
-    const projectedDelta: ResourceDelta = {};
-    for (const res of this.manifest.resources) {
-      projectedBreakdown[res.id] = { gained: 0, consumed: 0, net: 0 };
-      projectedDelta[res.id] = 0;
+    this.width = snapshot.width;
+    this.height = snapshot.height;
+    this.seed = snapshot.seed;
+    this.setupValues = { ...snapshot.setupValues };
+    this.rng = createSeededRng(`${this.seed}:sim:${snapshot.cycle}`);
+    this.pendingContinuation = null;
+
+    const fresh = this.createEmptyState(this.width, this.height);
+    fresh.cycle = snapshot.cycle;
+
+    const defaultIdx = this.cellIndexById.get(this.manifest.defaultCellTypeId) ?? 0;
+    for (let i = 0; i < fresh.grid.length; i++) {
+      const id = snapshot.grid[i];
+      const idx = this.cellIndexById.get(id) ?? defaultIdx;
+      fresh.grid[i] = idx;
+      this.initCellDefaults(fresh, i, this.cellTypes[idx]);
     }
 
-    const total = this.currentGrid.length;
-    for (let i = 0; i < total; i++) {
-      const cellType = this.cellTypeByIndex[this.currentGrid[i]];
-      counts[cellType.id] += 1;
+    for (const [idxStr, st] of Object.entries(snapshot.cellStates ?? {})) {
+      const idx = Number(idxStr);
+      if (!Number.isNaN(idx) && idx >= 0 && idx < fresh.grid.length) {
+        const existing = fresh.cellStates.get(idx) ?? {};
+        fresh.cellStates.set(idx, { ...existing, ...st });
+      }
     }
 
-    const supplyEntries = Array.from(this.supplyBuffers.entries());
-    const localSupplies: Record<SupplyId, number> = {};
-    const simResources: Record<ResourceId, number> = { ...this.resources };
-    const resourceCaps = this.getResourceCaps();
-    const evalIndices = this.getPrioritizedNonDefaultIndices();
-    const w = this.width;
-    let atRiskCount = 0;
+    for (const [idxStr, vis] of Object.entries(snapshot.cellVisuals ?? {})) {
+      const idx = Number(idxStr);
+      if (!Number.isNaN(idx) && idx >= 0 && idx < fresh.grid.length) {
+        fresh.cellVisuals.set(idx, { ...vis });
+      }
+    }
 
-    for (let k = 0; k < evalIndices.length; k++) {
-      const i = evalIndices[k];
-      const x = i % w;
-      const y = (i - x) / w;
-      const cellType = this.cellTypeByIndex[this.currentGrid[i]];
-      this.fillLocalSupplies(i, supplyEntries, localSupplies);
+    for (const v of this.manifest.globalState.variables) {
+      if (snapshot.globalValues[v.id] !== undefined) {
+        fresh.globalValues[v.id] = snapshot.globalValues[v.id];
+      }
+      if (v.hasCap && snapshot.globalCaps[v.id] !== undefined) {
+        fresh.globalCaps[v.id] = snapshot.globalCaps[v.id];
+      }
+    }
 
-      const outcome = evaluateCycleRules(
-        cellType,
-        this.createEvalContext(x, y, {
-          cellType,
-          state: this.cellStates[i] ?? {},
-          supplies: localSupplies,
-          resources: simResources,
-          resourceCaps,
-        })
-      );
-
-      for (const [resId, req] of Object.entries(outcome.consumedResources)) {
-        if (req <= 0) continue;
-        const avail = simResources[resId] ?? 0;
-        const actual = Math.min(avail, req);
-        if (actual > 0) {
-          simResources[resId] = avail - actual;
-          if (projectedBreakdown[resId]) {
-            projectedBreakdown[resId].consumed += actual;
-          }
+    for (const s of this.manifest.supplies) {
+      const arr = snapshot.supplies[s.id];
+      const buf = fresh.supplies.get(s.id);
+      if (arr && buf) {
+        for (let i = 0; i < Math.min(arr.length, buf.length); i++) {
+          buf[i] = arr[i];
         }
       }
-
-      if (outcome.nextTypeId === cellType.id) {
-        for (const [resId, amount] of Object.entries(outcome.producedResources)) {
-          if (!amount || !projectedBreakdown[resId]) continue;
-          if (amount > 0) projectedBreakdown[resId].gained += amount;
-          else projectedBreakdown[resId].consumed += Math.abs(amount);
-        }
-      }
-
-      if (outcome.nextTypeId !== cellType.id) {
-        atRiskCount += 1;
-      }
     }
 
-    for (const res of this.manifest.resources) {
-      const b = projectedBreakdown[res.id];
-      b.net = b.gained - b.consumed;
-      projectedDelta[res.id] = b.net;
+    fresh.notifications = (snapshot.notifications ?? []).map((n) => ({ ...n }));
+
+    this.state = fresh;
+    this.bumpVersion();
+  }
+
+  // ── Internal State & Host Helpers ────────────────────────────────────────
+
+  private bumpVersion(): void {
+    this.stateVersion++;
+  }
+
+  private createSupplyBufferMap(size: number): Map<SupplyId, Int16Array> {
+    const map = new Map<SupplyId, Int16Array>();
+    for (const s of this.manifest.supplies) {
+      map.set(s.id, new Int16Array(size));
+    }
+    return map;
+  }
+
+  private flushSupplyStaging(
+    target: CoreMutableState,
+    staging: Map<SupplyId, Int16Array>
+  ): void {
+    for (const supply of this.manifest.supplies) {
+      const src = staging.get(supply.id);
+      const dst = target.supplies.get(supply.id);
+      if (!src || !dst) continue;
+      const cap = supply.maxAmount ?? 32000;
+      for (let i = 0; i < dst.length; i++) {
+        if (src[i] > 0) {
+          dst[i] = Math.min(cap, dst[i] + src[i]);
+        }
+      }
+    }
+  }
+
+  private createEmptyState(width: number, height: number): CoreMutableState {
+    const size = width * height;
+    const globalValues: Record<GlobalVarId, RuntimeValue> = {};
+    const globalCaps: Record<GlobalVarId, number> = {};
+
+    for (const v of this.manifest.globalState.variables) {
+      globalValues[v.id] = v.initialValue;
+      if (v.hasCap) {
+        globalCaps[v.id] = v.initialMax ?? 0;
+      }
     }
 
     return {
-      cycle: this.cycleCount,
-      counts,
-      totalCells: total,
-      resources: { ...this.resources },
-      resourceCaps: this.getResourceCaps(),
-      projectedDelta,
-      projectedBreakdown,
-      atRiskCount,
+      grid: new Uint16Array(size),
+      cellStates: new Map(),
+      cellVisuals: new Map(),
+      globalValues,
+      globalCaps,
+      supplies: this.createSupplyBufferMap(size),
+      notifications: [],
+      cycle: 0,
+    };
+  }
+
+  private cloneState(src: CoreMutableState): CoreMutableState {
+    const cellStates = new Map<number, Record<string, RuntimeValue>>();
+    for (const [k, v] of src.cellStates.entries()) {
+      cellStates.set(k, { ...v });
+    }
+    const cellVisuals = new Map<number, CellVisualState>();
+    for (const [k, v] of src.cellVisuals.entries()) {
+      cellVisuals.set(k, { ...v });
+    }
+    const supplies = new Map<SupplyId, Int16Array>();
+    for (const [k, v] of src.supplies.entries()) {
+      supplies.set(k, new Int16Array(v));
+    }
+    return {
+      grid: new Uint16Array(src.grid),
+      cellStates,
+      cellVisuals,
+      globalValues: { ...src.globalValues },
+      globalCaps: { ...src.globalCaps },
+      supplies,
+      notifications: src.notifications.map((n) => ({ ...n })),
+      cycle: src.cycle,
+    };
+  }
+
+  private initCellDefaults(
+    target: CoreMutableState,
+    idx: number,
+    ct: CellTypeManifest
+  ): void {
+    if (ct.stateSchema.length > 0) {
+      const obj: Record<string, RuntimeValue> = {};
+      for (const f of ct.stateSchema) {
+        obj[f.key] = f.initialValue;
+      }
+      target.cellStates.set(idx, obj);
+    } else {
+      target.cellStates.delete(idx);
+    }
+
+    target.cellVisuals.set(idx, {
+      spriteId: ct.defaultSpriteId,
+      tintColor: null,
+      opacity: ct.defaultOpacity ?? 1,
+    });
+  }
+
+  // ── Access-Controlled State Accessors ────────────────────────────────────
+
+  private canReadGlobal(varDef: GlobalVariableManifest, scope: GraphScope): boolean {
+    if (scope === 'global') return true;
+    return varDef.access !== 'private';
+  }
+
+  private canWriteGlobal(varDef: GlobalVariableManifest, scope: GraphScope): boolean {
+    if (scope === 'global') return true;
+    return varDef.access === 'public';
+  }
+
+  private readGlobalInternal(
+    target: CoreMutableState,
+    varId: GlobalVarId,
+    scope: GraphScope
+  ): RuntimeValue {
+    const def = this.globalVarById.get(varId);
+    if (!def || !this.canReadGlobal(def, scope)) return 0;
+    return target.globalValues[varId] ?? def.initialValue;
+  }
+
+  private readGlobalCapInternal(
+    target: CoreMutableState,
+    varId: GlobalVarId,
+    scope: GraphScope
+  ): number {
+    const def = this.globalVarById.get(varId);
+    if (!def || !def.hasCap || !this.canReadGlobal(def, scope)) return 0;
+    return target.globalCaps[varId] ?? 0;
+  }
+
+  private readCellStateInternal(
+    target: CoreMutableState,
+    x: number,
+    y: number,
+    key: string,
+    scope: GraphScope
+  ): RuntimeValue {
+    const idx = y * this.width + x;
+    const ct = this.cellTypes[target.grid[idx]];
+    if (!ct) return 0;
+    const fieldDef = this.stateFieldMapByCell.get(ct.id)?.get(key);
+    if (scope === 'interface' && fieldDef && fieldDef.access === 'private') {
+      return 0;
+    }
+    const obj = target.cellStates.get(idx);
+    if (obj && obj[key] !== undefined) return obj[key];
+    return fieldDef?.initialValue ?? 0;
+  }
+
+  private writeCellStateInternal(
+    target: CoreMutableState,
+    x: number,
+    y: number,
+    key: string,
+    value: RuntimeValue,
+    scope: GraphScope
+  ): void {
+    const idx = y * this.width + x;
+    const ct = this.cellTypes[target.grid[idx]];
+    if (!ct) return;
+    const fieldDef = this.stateFieldMapByCell.get(ct.id)?.get(key);
+    if (scope === 'interface' && fieldDef && fieldDef.access !== 'public') {
+      return;
+    }
+    let obj = target.cellStates.get(idx);
+    if (!obj) {
+      obj = {};
+      target.cellStates.set(idx, obj);
+    }
+    obj[key] = value;
+  }
+
+  private createHost(
+    target: CoreMutableState,
+    options: {
+      immediateEmit: boolean;
+      emitStaging?: Map<SupplyId, Int16Array>;
+      immediateTransform: boolean;
+      transformQueue?: PendingTransform[];
+      breakdown?: Record<GlobalVarId, ResourceBreakdown>;
+    }
+  ): GraphVmHost {
+    const self = this;
+
+    const clampGlobalNumber = (def: GlobalVariableManifest, raw: number): number => {
+      let val = raw;
+      if (!def.allowNegative && val < 0) val = 0;
+      if (def.hasCap) {
+        const cap = target.globalCaps[def.id] ?? 0;
+        if (val > cap) val = cap;
+      }
+      return val;
+    };
+
+    const depositSupplyAt = (
+      tx: number,
+      ty: number,
+      supplyId: SupplyId,
+      amount: number
+    ) => {
+      if (tx < 0 || ty < 0 || tx >= self.width || ty >= self.height) return;
+      const supply = self.supplyById.get(supplyId);
+      if (!supply) return;
+      const idx = ty * self.width + tx;
+      const cap = supply.maxAmount ?? 32000;
+      if (options.immediateEmit || !options.emitStaging) {
+        const buf = target.supplies.get(supplyId);
+        if (buf) buf[idx] = Math.min(cap, buf[idx] + amount);
+      } else {
+        const buf = options.emitStaging.get(supplyId);
+        if (buf) buf[idx] = Math.min(cap, buf[idx] + amount);
+      }
+    };
+
+    return {
+      getSetupParam: (paramId) => self.setupValues[paramId] ?? 0,
+      random: () => self.rng(),
+
+      getGlobal: (varId, scope) => self.readGlobalInternal(target, varId, scope),
+      getGlobalCap: (varId, scope) => self.readGlobalCapInternal(target, varId, scope),
+      getGlobalVarName: (varId) => self.globalVarById.get(varId)?.name ?? varId,
+
+      setGlobal: (varId, value, scope) => {
+        const def = self.globalVarById.get(varId);
+        if (!def || !self.canWriteGlobal(def, scope)) return;
+        if (def.type === 'number') {
+          const prev = Number(target.globalValues[varId] ?? 0);
+          const next = clampGlobalNumber(def, Number(value));
+          target.globalValues[varId] = next;
+          if (options.breakdown?.[varId]) {
+            const diff = next - prev;
+            if (diff > 0) options.breakdown[varId].gained += diff;
+            else if (diff < 0) options.breakdown[varId].consumed += -diff;
+          }
+        } else {
+          target.globalValues[varId] = value;
+        }
+      },
+
+      addGlobal: (varId, amount, scope) => {
+        const def = self.globalVarById.get(varId);
+        if (!def || def.type !== 'number' || !self.canWriteGlobal(def, scope)) return;
+        const prev = Number(target.globalValues[varId] ?? 0);
+        const next = clampGlobalNumber(def, prev + amount);
+        target.globalValues[varId] = next;
+        if (options.breakdown?.[varId]) {
+          const diff = next - prev;
+          if (diff > 0) options.breakdown[varId].gained += diff;
+          else if (diff < 0) options.breakdown[varId].consumed += -diff;
+        }
+      },
+
+      consumeGlobal: (varId, amount, scope) => {
+        const def = self.globalVarById.get(varId);
+        if (!def || def.type !== 'number' || !self.canWriteGlobal(def, scope)) return false;
+        const cur = Number(target.globalValues[varId] ?? 0);
+        if (cur < amount) return false;
+        const next = clampGlobalNumber(def, cur - amount);
+        target.globalValues[varId] = next;
+        if (options.breakdown?.[varId]) {
+          options.breakdown[varId].consumed += cur - next;
+        }
+        return true;
+      },
+
+      addGlobalCap: (varId, delta, scope) => {
+        const def = self.globalVarById.get(varId);
+        if (!def || !def.hasCap || !self.canWriteGlobal(def, scope)) return;
+        const nextCap = Math.max(0, (target.globalCaps[varId] ?? 0) + delta);
+        target.globalCaps[varId] = nextCap;
+        if (def.type === 'number') {
+          const cur = Number(target.globalValues[varId] ?? 0);
+          if (cur > nextCap) {
+            target.globalValues[varId] = nextCap;
+            if (options.breakdown?.[varId]) {
+              options.breakdown[varId].consumed += cur - nextCap;
+            }
+          }
+        }
+      },
+
+      getCellState: (x, y, key, scope) =>
+        self.readCellStateInternal(target, x, y, key, scope),
+
+      setCellState: (x, y, key, value, scope) =>
+        self.writeCellStateInternal(target, x, y, key, value, scope),
+
+      addCellState: (x, y, key, amount, scope) => {
+        const cur = Number(self.readCellStateInternal(target, x, y, key, scope));
+        self.writeCellStateInternal(target, x, y, key, cur + amount, scope);
+      },
+
+      setCellSprite: (x, y, spriteId) => {
+        const idx = y * self.width + x;
+        const vis = target.cellVisuals.get(idx) ?? {
+          spriteId: null,
+          tintColor: null,
+          opacity: 1,
+        };
+        vis.spriteId = spriteId;
+        target.cellVisuals.set(idx, vis);
+      },
+
+      setCellColor: (x, y, color) => {
+        const idx = y * self.width + x;
+        const vis = target.cellVisuals.get(idx) ?? {
+          spriteId: null,
+          tintColor: null,
+          opacity: 1,
+        };
+        vis.tintColor = color;
+        target.cellVisuals.set(idx, vis);
+      },
+
+      setCellOpacity: (x, y, opacity) => {
+        const idx = y * self.width + x;
+        const vis = target.cellVisuals.get(idx) ?? {
+          spriteId: null,
+          tintColor: null,
+          opacity: 1,
+        };
+        vis.opacity = Math.max(0, Math.min(1, opacity));
+        target.cellVisuals.set(idx, vis);
+      },
+
+      transformCell: (x, y, toId, reason) => {
+        if (options.immediateTransform || !options.transformQueue) {
+          self.applyTransformInternal(target, x, y, toId, reason, options.breakdown);
+        } else {
+          const idx = y * self.width + x;
+          const fromId = self.cellTypes[target.grid[idx]]?.id ?? '';
+          // Replace any earlier queued transform for this exact tile
+          const existingIdx = options.transformQueue.findIndex((t) => t.idx === idx);
+          const item: PendingTransform = { idx, x, y, fromId, toId, reason };
+          if (existingIdx >= 0) {
+            options.transformQueue[existingIdx] = item;
+          } else {
+            options.transformQueue.push(item);
+          }
+        }
+      },
+
+      getSupply: (x, y, supplyId) => {
+        const buf = target.supplies.get(supplyId);
+        if (!buf) return 0;
+        return buf[y * self.width + x] ?? 0;
+      },
+
+      emitSupply: (x, y, supplyId, amount, area: EmitArea, includeSelf) => {
+        switch (area.shape) {
+          case 'self':
+            depositSupplyAt(x, y, supplyId, amount);
+            return;
+          case 'coords':
+            depositSupplyAt(area.x, area.y, supplyId, amount);
+            return;
+          case 'relative':
+            depositSupplyAt(x + area.dx, y + area.dy, supplyId, amount);
+            return;
+          case 'moore': {
+            const r = Math.max(0, Math.round(area.radius));
+            for (let dy = -r; dy <= r; dy++) {
+              for (let dx = -r; dx <= r; dx++) {
+                if (!includeSelf && dx === 0 && dy === 0) continue;
+                depositSupplyAt(x + dx, y + dy, supplyId, amount);
+              }
+            }
+            return;
+          }
+          case 'vonNeumann': {
+            const r = Math.max(0, Math.round(area.radius));
+            for (let dy = -r; dy <= r; dy++) {
+              for (let dx = -r; dx <= r; dx++) {
+                if (Math.abs(dx) + Math.abs(dy) > r) continue;
+                if (!includeSelf && dx === 0 && dy === 0) continue;
+                depositSupplyAt(x + dx, y + dy, supplyId, amount);
+              }
+            }
+            return;
+          }
+        }
+      },
+
+      consumeSupply: (x, y, supplyId, amount) => {
+        const buf = target.supplies.get(supplyId);
+        if (!buf) return false;
+        const idx = y * self.width + x;
+        if (buf[idx] < amount) return false;
+        buf[idx] -= amount;
+        return true;
+      },
+
+      reclaimCellState: (stateKey, amount, opts) => {
+        let remaining = Math.max(0, Math.floor(amount));
+        let reclaimed = 0;
+        if (remaining <= 0) return 0;
+
+        for (const [idx, st] of target.cellStates.entries()) {
+          if (remaining <= 0) break;
+          const val = st[stateKey];
+          if (typeof val === 'number' && val > 0) {
+            const take = Math.min(val, remaining);
+            st[stateKey] = val - take;
+            remaining -= take;
+            reclaimed += take;
+
+            if (opts?.resetVisualToDefault) {
+              const ct = self.cellTypes[target.grid[idx]];
+              if (ct) {
+                target.cellVisuals.set(idx, {
+                  spriteId: ct.defaultSpriteId,
+                  tintColor: null,
+                  opacity: ct.defaultOpacity ?? 1,
+                });
+              }
+            }
+            if (opts?.setStateOnAffected) {
+              for (const [k, v] of Object.entries(opts.setStateOnAffected)) {
+                st[k] = v;
+              }
+            }
+          }
+        }
+        return reclaimed;
+      },
+
+      pushGlobalNotification: (severity: NotificationSeverity, title, message) => {
+        target.notifications.push({
+          id: `g_${target.cycle}_${++self.notifCounter}`,
+          scope: 'global',
+          severity,
+          title,
+          message,
+          cycle: target.cycle,
+        });
+      },
+
+      pushCellNotification: (x, y, severity: NotificationSeverity, title, message) => {
+        const ct = self.cellTypes[target.grid[y * self.width + x]];
+        target.notifications.push({
+          id: `c_${target.cycle}_${x}_${y}_${++self.notifCounter}`,
+          scope: 'cell',
+          severity,
+          title,
+          message,
+          cycle: target.cycle,
+          x,
+          y,
+          cellTypeId: ct?.id,
+        });
+      },
+
+      clearCellNotifications: (x, y) => {
+        target.notifications = target.notifications.filter(
+          (n) => !(n.scope === 'cell' && n.x === x && n.y === y)
+        );
+      },
     };
   }
 }

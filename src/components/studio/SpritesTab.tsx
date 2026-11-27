@@ -1,0 +1,761 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  Copy,
+  Eraser,
+  FlipHorizontal2,
+  FlipVertical2,
+  Grid3X3,
+  PaintBucket,
+  Pencil,
+  Pipette,
+  Plus,
+  Redo2,
+  Trash2,
+  Undo2,
+  Upload,
+} from 'lucide-react';
+import {
+  encodeRgbaToPngDataUrl,
+  RulesetManifest,
+  SpriteAssetManifest,
+} from '../../engine/sdk';
+import {
+  decodeDataUrlToRgba32,
+  importImageFileAsPng32,
+  makeUniqueId,
+} from './studioUtils';
+
+interface SpritesTabProps {
+  manifest: RulesetManifest;
+  readOnly?: boolean;
+  onChange: (next: RulesetManifest) => void;
+}
+
+type PixelTool = 'pencil' | 'eraser' | 'fill' | 'eyedropper';
+
+const QUICK_PALETTE = [
+  '#0f172a', '#1e293b', '#334155', '#64748b', '#94a3b8', '#e2e8f0',
+  '#7f1d1d', '#dc2626', '#f43f5e', '#f97316', '#f59e0b', '#fde047',
+  '#14532d', '#16a34a', '#4ade80', '#10b981', '#0d9488', '#38bdf8',
+  '#1d4ed8', '#3b82f6', '#6366f1', '#8b5cf6', '#78350f', '#c2783e',
+];
+
+function hexToRgba(hex: string): [number, number, number, number] {
+  const c = hex.replace('#', '');
+  return [
+    parseInt(c.slice(0, 2), 16) || 0,
+    parseInt(c.slice(2, 4), 16) || 0,
+    parseInt(c.slice(4, 6), 16) || 0,
+    255,
+  ];
+}
+
+function rgbaToHex(r: number, g: number, b: number): string {
+  const h = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+export function SpritesTab({ manifest, readOnly, onChange }: SpritesTabProps) {
+  const [selectedId, setSelectedId] = useState<string>(
+    manifest.sprites[0]?.id ?? ''
+  );
+  const [tool, setTool] = useState<PixelTool>('pencil');
+  const [color, setColor] = useState<string>('#10b981');
+  const [showGrid, setShowGrid] = useState<boolean>(true);
+  const [pixels, setPixels] = useState<Uint8ClampedArray>(
+    () => new Uint8ClampedArray(32 * 32 * 4)
+  );
+  const [history, setHistory] = useState<Uint8ClampedArray[]>([]);
+  const [future, setFuture] = useState<Uint8ClampedArray[]>([]);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const paintingRef = useRef(false);
+  const strokeStartRef = useRef<Uint8ClampedArray | null>(null);
+  const pixelsRef = useRef(pixels);
+  pixelsRef.current = pixels;
+
+  const selectedSprite =
+    manifest.sprites.find((s) => s.id === selectedId) ?? manifest.sprites[0];
+
+  // Load selected sprite into pixel buffer
+  useEffect(() => {
+    if (!selectedSprite) {
+      setPixels(new Uint8ClampedArray(32 * 32 * 4));
+      setHistory([]);
+      setFuture([]);
+      return;
+    }
+    let cancelled = false;
+    decodeDataUrlToRgba32(selectedSprite.dataUrl).then((rgba) => {
+      if (!cancelled) {
+        setPixels(new Uint8ClampedArray(rgba));
+        setHistory([]);
+        setFuture([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSprite?.id]);
+
+  // Render 32×32 buffer to interactive 512×512 editor canvas
+  const renderCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const CELL = 16; // 32 * 16 = 512px
+    ctx.clearRect(0, 0, 512, 512);
+
+    // Checkerboard transparency backdrop
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        ctx.fillStyle = (x + y) % 2 === 0 ? '#111824' : '#16202F';
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+
+    // Pixels
+    const buf = pixels;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        const idx = (y * 32 + x) * 4;
+        const a = buf[idx + 3];
+        if (a === 0) continue;
+        ctx.fillStyle = `rgba(${buf[idx]},${buf[idx + 1]},${buf[idx + 2]},${a / 255})`;
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+      }
+    }
+
+    // Optional pixel grid
+    if (showGrid) {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 1; i < 32; i++) {
+        const p = i * CELL + 0.5;
+        ctx.moveTo(p, 0);
+        ctx.lineTo(p, 512);
+        ctx.moveTo(0, p);
+        ctx.lineTo(512, p);
+      }
+      ctx.stroke();
+    }
+  }, [pixels, showGrid]);
+
+  useEffect(() => {
+    renderCanvas();
+  }, [renderCanvas]);
+
+  const commitPixelsToManifest = useCallback(
+    (nextBuf: Uint8ClampedArray) => {
+      if (readOnly || !selectedSprite) return;
+      const dataUrl = encodeRgbaToPngDataUrl(
+        new Uint8Array(nextBuf.buffer, nextBuf.byteOffset, nextBuf.byteLength),
+        32,
+        32
+      );
+      onChange({
+        ...manifest,
+        sprites: manifest.sprites.map((sp) =>
+          sp.id === selectedSprite.id ? { ...sp, dataUrl } : sp
+        ),
+      });
+    },
+    [manifest, onChange, readOnly, selectedSprite]
+  );
+
+  const pushHistoryAndCommit = (nextBuf: Uint8ClampedArray) => {
+    setHistory((prev) => [...prev.slice(-29), new Uint8ClampedArray(pixelsRef.current)]);
+    setFuture([]);
+    setPixels(nextBuf);
+    commitPixelsToManifest(nextBuf);
+  };
+
+  const applyFloodFill = (
+    buf: Uint8ClampedArray,
+    startX: number,
+    startY: number,
+    rgba: [number, number, number, number]
+  ): Uint8ClampedArray => {
+    const next = new Uint8ClampedArray(buf);
+    const sIdx = (startY * 32 + startX) * 4;
+    const sr = next[sIdx];
+    const sg = next[sIdx + 1];
+    const sb = next[sIdx + 2];
+    const sa = next[sIdx + 3];
+    if (sr === rgba[0] && sg === rgba[1] && sb === rgba[2] && sa === rgba[3]) {
+      return next;
+    }
+
+    const queue: [number, number][] = [[startX, startY]];
+    const visited = new Uint8Array(32 * 32);
+    visited[startY * 32 + startX] = 1;
+
+    while (queue.length > 0) {
+      const [cx, cy] = queue.pop()!;
+      const idx = (cy * 32 + cx) * 4;
+      next[idx] = rgba[0];
+      next[idx + 1] = rgba[1];
+      next[idx + 2] = rgba[2];
+      next[idx + 3] = rgba[3];
+
+      const dirs = [
+        [cx - 1, cy],
+        [cx + 1, cy],
+        [cx, cy - 1],
+        [cx, cy + 1],
+      ];
+      for (const [nx, ny] of dirs) {
+        if (nx < 0 || ny < 0 || nx >= 32 || ny >= 32) continue;
+        const pIdx = ny * 32 + nx;
+        if (visited[pIdx]) continue;
+        const cIdx = pIdx * 4;
+        if (
+          next[cIdx] === sr &&
+          next[cIdx + 1] === sg &&
+          next[cIdx + 2] === sb &&
+          next[cIdx + 3] === sa
+        ) {
+          visited[pIdx] = 1;
+          queue.push([nx, ny]);
+        }
+      }
+    }
+    return next;
+  };
+
+  const getPixelCoord = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.floor(((e.clientX - rect.left) / rect.width) * 32);
+    const y = Math.floor(((e.clientY - rect.top) / rect.height) * 32);
+    if (x < 0 || y < 0 || x >= 32 || y >= 32) return null;
+    return { x, y };
+  };
+
+  const paintAt = (x: number, y: number, activeTool: PixelTool) => {
+    if (activeTool === 'eyedropper') {
+      const idx = (y * 32 + x) * 4;
+      if (pixelsRef.current[idx + 3] > 0) {
+        setColor(
+          rgbaToHex(
+            pixelsRef.current[idx],
+            pixelsRef.current[idx + 1],
+            pixelsRef.current[idx + 2]
+          )
+        );
+        setTool('pencil');
+      }
+      return;
+    }
+
+    if (readOnly) return;
+
+    if (activeTool === 'fill') {
+      const filled = applyFloodFill(pixelsRef.current, x, y, hexToRgba(color));
+      pushHistoryAndCommit(filled);
+      return;
+    }
+
+    const next = new Uint8ClampedArray(pixelsRef.current);
+    const idx = (y * 32 + x) * 4;
+    if (activeTool === 'eraser') {
+      next[idx] = 0;
+      next[idx + 1] = 0;
+      next[idx + 2] = 0;
+      next[idx + 3] = 0;
+    } else {
+      const [r, g, b, a] = hexToRgba(color);
+      next[idx] = r;
+      next[idx + 1] = g;
+      next[idx + 2] = b;
+      next[idx + 3] = a;
+    }
+    setPixels(next);
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const pt = getPixelCoord(e);
+    if (!pt) return;
+    if (tool === 'eyedropper' || tool === 'fill') {
+      paintAt(pt.x, pt.y, tool);
+      return;
+    }
+    if (readOnly) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    paintingRef.current = true;
+    strokeStartRef.current = new Uint8ClampedArray(pixelsRef.current);
+    paintAt(pt.x, pt.y, e.button === 2 ? 'eraser' : tool);
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!paintingRef.current || readOnly) return;
+    const pt = getPixelCoord(e);
+    if (!pt) return;
+    paintAt(pt.x, pt.y, (e.buttons & 2) !== 0 ? 'eraser' : tool);
+  };
+
+  const handleCanvasPointerUp = () => {
+    if (!paintingRef.current) return;
+    paintingRef.current = false;
+    if (strokeStartRef.current) {
+      setHistory((prev) => [...prev.slice(-29), strokeStartRef.current!]);
+      setFuture([]);
+      strokeStartRef.current = null;
+      commitPixelsToManifest(pixelsRef.current);
+    }
+  };
+
+  const handleUndo = () => {
+    if (readOnly || history.length === 0) return;
+    const prev = history[history.length - 1];
+    setHistory((h) => h.slice(0, -1));
+    setFuture((f) => [new Uint8ClampedArray(pixelsRef.current), ...f.slice(0, 29)]);
+    setPixels(prev);
+    commitPixelsToManifest(prev);
+  };
+
+  const handleRedo = () => {
+    if (readOnly || future.length === 0) return;
+    const next = future[0];
+    setFuture((f) => f.slice(1));
+    setHistory((h) => [...h.slice(-29), new Uint8ClampedArray(pixelsRef.current)]);
+    setPixels(next);
+    commitPixelsToManifest(next);
+  };
+
+  const handleFlip = (axis: 'h' | 'v') => {
+    if (readOnly) return;
+    const src = pixelsRef.current;
+    const out = new Uint8ClampedArray(32 * 32 * 4);
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        const dx = axis === 'h' ? 31 - x : x;
+        const dy = axis === 'v' ? 31 - y : y;
+        const si = (y * 32 + x) * 4;
+        const di = (dy * 32 + dx) * 4;
+        out[di] = src[si];
+        out[di + 1] = src[si + 1];
+        out[di + 2] = src[si + 2];
+        out[di + 3] = src[si + 3];
+      }
+    }
+    pushHistoryAndCommit(out);
+  };
+
+  const handleClear = () => {
+    if (readOnly) return;
+    pushHistoryAndCommit(new Uint8ClampedArray(32 * 32 * 4));
+  };
+
+  const handleNewSprite = () => {
+    if (readOnly) return;
+    const id = makeUniqueId(
+      'sprite',
+      manifest.sprites.map((s) => s.id)
+    );
+    const blank = new Uint8Array(32 * 32 * 4);
+    const sp: SpriteAssetManifest = {
+      id,
+      name: `Sprite ${manifest.sprites.length + 1}`,
+      width: 32,
+      height: 32,
+      dataUrl: encodeRgbaToPngDataUrl(blank, 32, 32),
+    };
+    onChange({ ...manifest, sprites: [...manifest.sprites, sp] });
+    setSelectedId(id);
+  };
+
+  const handleUploadPng = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || readOnly) return;
+    try {
+      const dataUrl = await importImageFileAsPng32(file);
+      const baseName = file.name.replace(/\.[^.]+$/, '');
+      const id = makeUniqueId(
+        baseName,
+        manifest.sprites.map((s) => s.id)
+      );
+      const sp: SpriteAssetManifest = {
+        id,
+        name: baseName || id,
+        width: 32,
+        height: 32,
+        dataUrl,
+      };
+      onChange({ ...manifest, sprites: [...manifest.sprites, sp] });
+      setSelectedId(id);
+    } catch {
+      // Ignore corrupt image files
+    }
+  };
+
+  const handleDuplicateSprite = () => {
+    if (readOnly || !selectedSprite) return;
+    const id = makeUniqueId(
+      `${selectedSprite.id}_copy`,
+      manifest.sprites.map((s) => s.id)
+    );
+    const copy: SpriteAssetManifest = {
+      ...selectedSprite,
+      id,
+      name: `${selectedSprite.name} Copy`,
+    };
+    onChange({ ...manifest, sprites: [...manifest.sprites, copy] });
+    setSelectedId(id);
+  };
+
+  const handleDeleteSprite = (id: string) => {
+    if (readOnly) return;
+    const nextSprites = manifest.sprites.filter((s) => s.id !== id);
+    onChange({ ...manifest, sprites: nextSprites });
+    if (selectedId === id) {
+      setSelectedId(nextSprites[0]?.id ?? '');
+    }
+  };
+
+  const renameSprite = (patch: Partial<Pick<SpriteAssetManifest, 'id' | 'name'>>) => {
+    if (readOnly || !selectedSprite) return;
+    onChange({
+      ...manifest,
+      sprites: manifest.sprites.map((s) =>
+        s.id === selectedSprite.id ? { ...s, ...patch } : s
+      ),
+    });
+    if (patch.id) setSelectedId(patch.id);
+  };
+
+  return (
+    <div className="flex-1 flex min-h-0 overflow-hidden">
+      {/* Left: Sprite Asset Library */}
+      <aside className="w-64 shrink-0 border-r border-[#1F2A38] bg-[#111720] flex flex-col min-h-0">
+        <div className="p-3 border-b border-[#1F2A38] space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-[#E6EDF3]">
+              Sprites ({manifest.sprites.length})
+            </span>
+            <span className="font-mono text-[10px] text-[#8B98A9]">32×32 PNG</span>
+          </div>
+          {!readOnly && (
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={handleNewSprite}
+                className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>New</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-[#E6EDF3] bg-[#17202B] hover:bg-[#1F2A38] border border-[#2D3C4E] rounded cursor-pointer"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Upload PNG</span>
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/*"
+                onChange={handleUploadPng}
+                className="hidden"
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {manifest.sprites.map((sp) => {
+            const active = sp.id === selectedSprite?.id;
+            return (
+              <div
+                key={sp.id}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-md border transition-colors ${
+                  active
+                    ? 'bg-[#17202B] border-[#10B981]'
+                    : 'bg-transparent border-transparent hover:bg-[#17202B]/50'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(sp.id)}
+                  className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                >
+                  <img
+                    src={sp.dataUrl}
+                    alt={sp.name}
+                    className="w-7 h-7 rounded-[2px] border border-white/10 bg-[#0B0F14] shrink-0"
+                    style={{ imageRendering: 'pixelated' }}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-[#E6EDF3] truncate">
+                      {sp.name}
+                    </div>
+                    <div className="font-mono text-[10px] text-[#8B98A9] truncate">
+                      {sp.id}
+                    </div>
+                  </div>
+                </button>
+                {!readOnly && (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteSprite(sp.id)}
+                    title="Delete sprite"
+                    className="p-1 text-[#8B98A9] hover:text-[#F43F5E] cursor-pointer shrink-0"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </aside>
+
+      {/* Right: Built-in 32×32 Pixel-Art Editor */}
+      {selectedSprite ? (
+        <div className="flex-1 overflow-y-auto p-6">
+          <div className="max-w-4xl flex flex-col lg:flex-row gap-6 items-start">
+            {/* Pixel Canvas Column */}
+            <div className="space-y-3">
+              {/* Tools Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-[#111720] border border-[#1F2A38] rounded-md p-1.5">
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { id: 'pencil', icon: Pencil, label: 'Pencil' },
+                      { id: 'eraser', icon: Eraser, label: 'Eraser' },
+                      { id: 'fill', icon: PaintBucket, label: 'Fill' },
+                      { id: 'eyedropper', icon: Pipette, label: 'Pick Color' },
+                    ] as const
+                  ).map((item) => {
+                    const Icon = item.icon;
+                    const active = tool === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setTool(item.id)}
+                        title={item.label}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#10B981] text-[#0B0F14] font-semibold'
+                            : 'text-[#8B98A9] hover:text-[#E6EDF3] hover:bg-[#17202B]'
+                        }`}
+                      >
+                        <Icon className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowGrid((g) => !g)}
+                    title="Toggle pixel grid"
+                    className={`p-1.5 rounded cursor-pointer ${
+                      showGrid
+                        ? 'bg-[#17202B] text-[#E6EDF3]'
+                        : 'text-[#8B98A9] hover:text-[#E6EDF3]'
+                    }`}
+                  >
+                    <Grid3X3 className="w-3.5 h-3.5" />
+                  </button>
+                  {!readOnly && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={history.length === 0}
+                        onClick={handleUndo}
+                        title="Undo"
+                        className="p-1.5 text-[#8B98A9] hover:text-[#E6EDF3] disabled:opacity-40 rounded cursor-pointer"
+                      >
+                        <Undo2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={future.length === 0}
+                        onClick={handleRedo}
+                        title="Redo"
+                        className="p-1.5 text-[#8B98A9] hover:text-[#E6EDF3] disabled:opacity-40 rounded cursor-pointer"
+                      >
+                        <Redo2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleFlip('h')}
+                        title="Flip horizontally"
+                        className="p-1.5 text-[#8B98A9] hover:text-[#E6EDF3] rounded cursor-pointer"
+                      >
+                        <FlipHorizontal2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleFlip('v')}
+                        title="Flip vertically"
+                        className="p-1.5 text-[#8B98A9] hover:text-[#E6EDF3] rounded cursor-pointer"
+                      >
+                        <FlipVertical2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClear}
+                        className="px-2 py-1 text-[11px] text-[#F43F5E] hover:bg-[#F43F5E]/10 rounded cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* 512×512 Crisp Interactive Canvas */}
+              <div className="inline-block border border-[#2D3C4E] rounded-md overflow-hidden bg-[#0B0F14] shadow-xl">
+                <canvas
+                  ref={canvasRef}
+                  width={512}
+                  height={512}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onPointerDown={handleCanvasPointerDown}
+                  onPointerMove={handleCanvasPointerMove}
+                  onPointerUp={handleCanvasPointerUp}
+                  onPointerLeave={handleCanvasPointerUp}
+                  style={{ imageRendering: 'pixelated' }}
+                  className="block w-[416px] h-[416px] sm:w-[480px] sm:h-[480px] cursor-crosshair touch-none"
+                />
+              </div>
+            </div>
+
+            {/* Right Controls: Metadata, Color Picker, Live Scale Preview */}
+            <div className="w-full lg:w-64 space-y-5">
+              <div className="space-y-3 bg-[#111720] border border-[#1F2A38] rounded-md p-3.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#E6EDF3]">
+                    Sprite Metadata
+                  </span>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={handleDuplicateSprite}
+                      title="Duplicate sprite"
+                      className="p-1 text-[#8B98A9] hover:text-[#E6EDF3] cursor-pointer"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-[11px] text-[#8B98A9] mb-1">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    disabled={readOnly}
+                    value={selectedSprite.name}
+                    onChange={(e) => renameSprite({ name: e.target.value })}
+                    className="w-full bg-[#0B0F14] border border-[#1F2A38] focus:border-[#10B981] rounded px-2.5 py-1.5 text-xs text-[#E6EDF3] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-[#8B98A9] mb-1">
+                    Asset ID
+                  </label>
+                  <input
+                    type="text"
+                    disabled={readOnly}
+                    value={selectedSprite.id}
+                    onChange={(e) => renameSprite({ id: e.target.value })}
+                    className="w-full bg-[#0B0F14] border border-[#1F2A38] focus:border-[#10B981] rounded px-2.5 py-1.5 text-xs font-mono text-[#E6EDF3] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              {/* Color & Palette */}
+              <div className="space-y-3 bg-[#111720] border border-[#1F2A38] rounded-md p-3.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#E6EDF3]">
+                    Brush Color
+                  </span>
+                  <span className="font-mono text-[11px] text-[#8B98A9]">
+                    {color}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    disabled={readOnly}
+                    value={color}
+                    onChange={(e) => setColor(e.target.value)}
+                    className="w-10 h-8 bg-transparent border border-[#1F2A38] rounded cursor-pointer"
+                  />
+                  <input
+                    type="text"
+                    disabled={readOnly}
+                    value={color}
+                    onChange={(e) => setColor(e.target.value)}
+                    className="flex-1 bg-[#0B0F14] border border-[#1F2A38] rounded px-2.5 py-1.5 text-xs font-mono text-[#E6EDF3]"
+                  />
+                </div>
+                <div className="grid grid-cols-6 gap-1.5">
+                  {QUICK_PALETTE.map((swatch) => (
+                    <button
+                      key={swatch}
+                      type="button"
+                      onClick={() => {
+                        setColor(swatch);
+                        if (tool === 'eraser') setTool('pencil');
+                      }}
+                      style={{ backgroundColor: swatch }}
+                      className={`h-6 rounded border cursor-pointer ${
+                        color.toLowerCase() === swatch.toLowerCase()
+                          ? 'border-white ring-1 ring-[#10B981]'
+                          : 'border-white/15'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Live 1× / 2× / 4× Scale Preview */}
+              <div className="space-y-2.5 bg-[#111720] border border-[#1F2A38] rounded-md p-3.5">
+                <span className="text-xs font-semibold text-[#E6EDF3]">
+                  Live Tile Preview
+                </span>
+                <div className="flex items-end gap-3 pt-1">
+                  <div className="text-center">
+                    <img
+                      src={selectedSprite.dataUrl}
+                      alt=""
+                      className="w-8 h-8 border border-[#2D3C4E] bg-[#0B0F14] mx-auto"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
+                    <span className="font-mono text-[10px] text-[#8B98A9]">1×</span>
+                  </div>
+                  <div className="text-center">
+                    <img
+                      src={selectedSprite.dataUrl}
+                      alt=""
+                      className="w-16 h-16 border border-[#2D3C4E] bg-[#0B0F14] mx-auto"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
+                    <span className="font-mono text-[10px] text-[#8B98A9]">2×</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center justify-center text-xs text-[#8B98A9]">
+          Create or upload a 32×32 PNG sprite to begin.
+        </div>
+      )}
+    </div>
+  );
+}

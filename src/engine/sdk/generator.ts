@@ -1,289 +1,451 @@
-import {
-  GeneratorStep,
-  GridMutator,
-  SeededRng,
-  WorldSetupValues,
-} from './types';
+import { createSeededRng } from './decay';
+import { CellTypeId, GraphNode, NodeGraph, RuntimeValue } from './types';
 
-const CARDINAL_DIRS = [
-  [1, 0],
-  [-1, 0],
-  [0, 1],
-  [0, -1],
-] as const;
+// ============================================================================
+// Layer & Mask Node-Based World Generator (Schema v4)
+// Operates on 2D Masks (Float32Array 0..1) and Cell Layers (Int16Array, -1 = transparent)
+// ============================================================================
 
-function resolveDensityMultiplier(
-  setup: WorldSetupValues,
-  densityParam?: string
-): number {
-  if (!densityParam) return 1;
-  const raw = setup.params[densityParam];
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
-    return raw;
+export interface GeneratorContext {
+  width: number;
+  height: number;
+  seed: string;
+  setupValues: Record<string, RuntimeValue>;
+  cellIndexById: Map<CellTypeId, number>;
+  defaultCellIndex: number;
+}
+
+type GenValue = number | Float32Array | Int16Array;
+
+function hash2D(ix: number, iy: number, seedNum: number): number {
+  let n = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seedNum, 1442695041);
+  n = (n ^ (n >>> 13)) >>> 0;
+  n = Math.imul(n, 1274126177) >>> 0;
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+
+function smoothstep(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+
+function valueNoise2D(x: number, y: number, seedNum: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = smoothstep(x - x0);
+  const fy = smoothstep(y - y0);
+
+  const v00 = hash2D(x0, y0, seedNum);
+  const v10 = hash2D(x0 + 1, y0, seedNum);
+  const v01 = hash2D(x0, y0 + 1, seedNum);
+  const v11 = hash2D(x0 + 1, y0 + 1, seedNum);
+
+  const a = v00 + (v10 - v00) * fx;
+  const b = v01 + (v11 - v01) * fx;
+  return a + (b - a) * fy;
+}
+
+function seedToNumber(seed: string, offset: number): number {
+  let h = 2166136261 >>> 0;
+  const full = `${seed}:${offset}`;
+  for (let i = 0; i < full.length; i++) {
+    h ^= full.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  if (typeof raw === 'string') {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
+  return h >>> 0;
+}
+
+function numVal(v: GenValue | undefined, fallback = 0): number {
+  return typeof v === 'number' && !Number.isNaN(v) ? v : fallback;
+}
+
+function maskVal(v: GenValue | undefined, size: number): Float32Array {
+  return v instanceof Float32Array ? v : new Float32Array(size);
+}
+
+function layerVal(v: GenValue | undefined, size: number): Int16Array {
+  if (v instanceof Int16Array) return v;
+  const empty = new Int16Array(size);
+  empty.fill(-1);
+  return empty;
+}
+
+export function runWorldGeneratorGraph(
+  graph: NodeGraph,
+  grid: Uint16Array,
+  ctx: GeneratorContext
+): void {
+  const size = ctx.width * ctx.height;
+  grid.fill(ctx.defaultCellIndex);
+
+  const nodes = new Map<string, GraphNode>();
+  const dataIn = new Map<string, { nodeId: string; port: string }>();
+
+  let outputNode: GraphNode | undefined;
+  for (const node of graph.nodes) {
+    nodes.set(node.id, node);
+    if (node.type === 'gen.output') {
+      outputNode = node;
     }
   }
-  return 1;
-}
-
-function buildShuffledSectors(
-  count: number,
-  width: number,
-  height: number,
-  rng: SeededRng
-): { cols: number; rows: number; order: number[] } {
-  const cols = Math.max(
-    1,
-    Math.round(Math.sqrt(count * (width / Math.max(1, height))))
-  );
-  const rows = Math.max(1, Math.ceil(count / cols));
-  const order: number[] = [];
-  for (let s = 0; s < cols * rows; s++) {
-    order.push(s);
+  for (const edge of graph.edges) {
+    dataIn.set(`${edge.toNode}:${edge.toPort}`, {
+      nodeId: edge.fromNode,
+      port: edge.fromPort,
+    });
   }
-  for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = order[i];
-    order[i] = order[j];
-    order[j] = tmp;
-  }
-  return { cols, rows, order };
-}
 
-function runClustersStep(
-  grid: GridMutator,
-  setup: WorldSetupValues,
-  step: Extract<GeneratorStep, { type: 'clusters' }>,
-  rng: SeededRng
-): void {
-  const area = grid.width * grid.height;
-  const baseScale = area / 768;
-  const densityMult = resolveDensityMultiplier(setup, step.densityParam);
-  const minClusters = step.minClusters ?? 1;
-  const clusterCount = Math.max(
-    minClusters,
-    Math.round(step.clustersPer768 * baseScale * densityMult)
-  );
+  if (!outputNode) return;
 
-  const { cols, rows, order } = buildShuffledSectors(
-    clusterCount,
-    grid.width,
-    grid.height,
-    rng
-  );
-  const sectorW = grid.width / cols;
-  const sectorH = grid.height / rows;
-  const onlyOnEmpty = step.onlyOnEmpty ?? false;
+  const cache = new Map<string, GenValue>();
 
-  for (let c = 0; c < clusterCount; c++) {
-    const sector = order[c % order.length];
-    const sc = sector % cols;
-    const sr = Math.floor(sector / cols);
-
-    const minX = Math.floor(sc * sectorW);
-    const maxX = Math.max(
-      minX,
-      Math.min(grid.width - 1, Math.ceil((sc + 1) * sectorW) - 1)
-    );
-    const minY = Math.floor(sr * sectorH);
-    const maxY = Math.max(
-      minY,
-      Math.min(grid.height - 1, Math.ceil((sr + 1) * sectorH) - 1)
-    );
-
-    let x = minX + Math.floor(rng() * (maxX - minX + 1));
-    let y = minY + Math.floor(rng() * (maxY - minY + 1));
-
-    const targetSize =
-      step.minSize +
-      Math.floor(rng() * Math.max(1, step.maxSize - step.minSize + 1));
-
-    const visited = new Set<number>();
-    let placed = 0;
-    const maxAttempts = targetSize * 4;
-
-    for (
-      let attempt = 0;
-      attempt < maxAttempts && placed < targetSize;
-      attempt++
-    ) {
-      const key = y * grid.width + x;
-      if (!visited.has(key)) {
-        visited.add(key);
-        if (!onlyOnEmpty || grid.getCell(x, y) === grid.defaultCellTypeId) {
-          grid.setCell(x, y, step.cell);
-          placed++;
-        }
-      }
-
-      const startDir = Math.floor(rng() * CARDINAL_DIRS.length);
-      let moved = false;
-      for (let d = 0; d < CARDINAL_DIRS.length; d++) {
-        const [dx, dy] = CARDINAL_DIRS[(startDir + d) % CARDINAL_DIRS.length];
-        const nx = x + dx;
-        const ny = y + dy;
-        if (
-          nx >= 0 &&
-          nx < grid.width &&
-          ny >= 0 &&
-          ny < grid.height &&
-          !visited.has(ny * grid.width + nx) &&
-          (!onlyOnEmpty || grid.getCell(nx, ny) === grid.defaultCellTypeId)
-        ) {
-          x = nx;
-          y = ny;
-          moved = true;
-          break;
-        }
-      }
-
-      if (!moved) {
-        const [dx, dy] = CARDINAL_DIRS[startDir];
-        x = Math.max(0, Math.min(grid.width - 1, x + dx));
-        y = Math.max(0, Math.min(grid.height - 1, y + dy));
-      }
+  const readInput = (
+    nodeId: string,
+    port: string,
+    fallback: number | undefined,
+    visiting: Set<string>
+  ): GenValue | undefined => {
+    const src = dataIn.get(`${nodeId}:${port}`);
+    if (src) {
+      return evalNode(src.nodeId, src.port, visiting);
     }
-  }
-}
+    const node = nodes.get(nodeId);
+    const dataVal = node?.data?.[port];
+    if (typeof dataVal === 'number') return dataVal;
+    return fallback;
+  };
 
-function runScatterStep(
-  grid: GridMutator,
-  setup: WorldSetupValues,
-  step: Extract<GeneratorStep, { type: 'scatter' }>,
-  rng: SeededRng
-): void {
-  const area = grid.width * grid.height;
-  const baseScale = area / 768;
-  const densityMult = resolveDensityMultiplier(setup, step.densityParam);
-  const count = Math.max(
-    step.minCount ?? 0,
-    Math.round(step.countPer768 * baseScale * densityMult)
-  );
-  if (count <= 0) return;
+  const evalNode = (
+    nodeId: string,
+    port: string,
+    visiting: Set<string>
+  ): GenValue => {
+    const cacheKey = `${nodeId}:${port}`;
+    if (cache.has(cacheKey)) return cache.get(cacheKey)!;
+    if (visiting.has(cacheKey)) return 0;
 
-  const { cols, rows, order } = buildShuffledSectors(
-    count,
-    grid.width,
-    grid.height,
-    rng
-  );
-  const sectorW = grid.width / cols;
-  const sectorH = grid.height / rows;
-  const onlyOnEmpty = step.onlyOnEmpty ?? true;
+    const node = nodes.get(nodeId);
+    if (!node) return 0;
 
-  for (let i = 0; i < count; i++) {
-    const sector = order[i % order.length];
-    const sc = sector % cols;
-    const sr = Math.floor(sector / cols);
+    visiting.add(cacheKey);
+    const data = node.data ?? {};
+    let result: GenValue = 0;
 
-    const minX = Math.floor(sc * sectorW);
-    const maxX = Math.max(
-      minX,
-      Math.min(grid.width - 1, Math.ceil((sc + 1) * sectorW) - 1)
-    );
-    const minY = Math.floor(sr * sectorH);
-    const maxY = Math.max(
-      minY,
-      Math.min(grid.height - 1, Math.ceil((sr + 1) * sectorH) - 1)
-    );
-
-    for (let tries = 0; tries < 6; tries++) {
-      const x = minX + Math.floor(rng() * (maxX - minX + 1));
-      const y = minY + Math.floor(rng() * (maxY - minY + 1));
-      if (!onlyOnEmpty || grid.getCell(x, y) === grid.defaultCellTypeId) {
-        grid.setCell(x, y, step.cell);
+    switch (node.type) {
+      case 'gen.setupParam': {
+        const paramId = String(data.paramId ?? '');
+        const raw = ctx.setupValues[paramId];
+        result = typeof raw === 'number' ? raw : typeof raw === 'boolean' ? (raw ? 1 : 0) : 0;
         break;
       }
-    }
-  }
-}
 
-function runPlaceNearStep(
-  grid: GridMutator,
-  step: Extract<GeneratorStep, { type: 'placeNear' }>,
-  rng: SeededRng
-): void {
-  const r = Math.max(1, step.radius ?? 1);
-  const neighborhood = step.neighborhood ?? 'vonNeumann';
-  const onlyOnEmpty = step.onlyOnEmpty ?? true;
-  const candidates: { x: number; y: number }[] = [];
-  const seen = new Set<number>();
-
-  for (let y = 0; y < grid.height; y++) {
-    for (let x = 0; x < grid.width; x++) {
-      if (grid.getCell(x, y) !== step.nearCell) continue;
-
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (dx === 0 && dy === 0) continue;
-          if (neighborhood === 'vonNeumann' && Math.abs(dx) + Math.abs(dy) > r) {
-            continue;
-          }
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || nx >= grid.width || ny < 0 || ny >= grid.height) {
-            continue;
-          }
-          const key = ny * grid.width + nx;
-          if (seen.has(key)) continue;
-          if (onlyOnEmpty && grid.getCell(nx, ny) !== grid.defaultCellTypeId) {
-            continue;
-          }
-          seen.add(key);
-          candidates.push({ x: nx, y: ny });
-        }
+      case 'gen.mapSize': {
+        result = port === 'height' ? ctx.height : ctx.width;
+        break;
       }
-    }
-  }
 
-  for (let i = candidates.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = candidates[i];
-    candidates[i] = candidates[j];
-    candidates[j] = tmp;
-  }
+      case 'gen.constNumber': {
+        result = typeof data.value === 'number' ? data.value : 0;
+        break;
+      }
 
-  let placed = 0;
-  for (const coord of candidates) {
-    if (step.maxCount !== undefined && placed >= step.maxCount) break;
-    if (rng() <= step.chance) {
-      grid.setCell(coord.x, coord.y, step.cell);
-      placed++;
-    }
-  }
-}
-
-/**
- * Executes an ordered declarative world generator pipeline deterministically.
- */
-export function runWorldGeneratorPipeline(
-  steps: readonly GeneratorStep[],
-  grid: GridMutator,
-  setup: WorldSetupValues,
-  rng: SeededRng
-): void {
-  for (const step of steps) {
-    switch (step.type) {
-      case 'fill':
-        for (let y = 0; y < grid.height; y++) {
-          for (let x = 0; x < grid.width; x++) {
-            grid.setCell(x, y, step.cell);
-          }
+      case 'gen.math': {
+        const a = numVal(readInput(nodeId, 'a', typeof data.a === 'number' ? data.a : 0, visiting));
+        const b = numVal(readInput(nodeId, 'b', typeof data.b === 'number' ? data.b : 1, visiting));
+        switch (data.op) {
+          case 'add':
+            result = a + b;
+            break;
+          case 'sub':
+            result = a - b;
+            break;
+          case 'mul':
+            result = a * b;
+            break;
+          case 'div':
+            result = b === 0 ? 0 : a / b;
+            break;
+          case 'min':
+            result = Math.min(a, b);
+            break;
+          case 'max':
+            result = Math.max(a, b);
+            break;
+          default:
+            result = a * b;
         }
         break;
-      case 'clusters':
-        runClustersStep(grid, setup, step, rng);
+      }
+
+      case 'gen.noise': {
+        const scale = Math.max(
+          0.5,
+          numVal(readInput(nodeId, 'scale', typeof data.scale === 'number' ? data.scale : 6, visiting), 6)
+        );
+        const octaves = Math.max(1, Math.min(5, Math.round(Number(data.octaves ?? 2))));
+        const seedOffset = Number(data.seedOffset ?? 0);
+        const seedNum = seedToNumber(ctx.seed, seedOffset);
+        const mask = new Float32Array(size);
+
+        for (let y = 0; y < ctx.height; y++) {
+          for (let x = 0; x < ctx.width; x++) {
+            let amp = 1;
+            let freq = 1 / scale;
+            let total = 0;
+            let norm = 0;
+            for (let o = 0; o < octaves; o++) {
+              total += valueNoise2D(x * freq, y * freq, seedNum + o * 7919) * amp;
+              norm += amp;
+              amp *= 0.5;
+              freq *= 2;
+            }
+            mask[y * ctx.width + x] = norm > 0 ? total / norm : 0;
+          }
+        }
+        result = mask;
         break;
-      case 'scatter':
-        runScatterStep(grid, setup, step, rng);
+      }
+
+      case 'gen.clusters': {
+        const coverage = Math.max(
+          0,
+          Math.min(
+            1,
+            numVal(
+              readInput(
+                nodeId,
+                'coverage',
+                typeof data.targetCoverage === 'number' ? data.targetCoverage : 0.12,
+                visiting
+              ),
+              0.12
+            )
+          )
+        );
+        const clusterSize = Math.max(
+          1,
+          Math.round(
+            numVal(
+              readInput(
+                nodeId,
+                'clusterSize',
+                typeof data.clusterSize === 'number' ? data.clusterSize : 5,
+                visiting
+              ),
+              5
+            )
+          )
+        );
+        const seedOffset = Number(data.seedOffset ?? 0);
+        const rng = createSeededRng(`${ctx.seed}:cluster:${nodeId}:${seedOffset}`);
+        const mask = new Float32Array(size);
+        const targetCount = Math.round(size * coverage);
+        let placed = 0;
+        let attempts = 0;
+        const maxAttempts = Math.max(60, targetCount * 8);
+
+        while (placed < targetCount && attempts < maxAttempts) {
+          attempts++;
+          let cx = Math.floor(rng() * ctx.width);
+          let cy = Math.floor(rng() * ctx.height);
+
+          const blobSteps = Math.max(1, Math.round(clusterSize * (0.6 + rng() * 0.8)));
+          for (let s = 0; s < blobSteps && placed < targetCount; s++) {
+            const idx = cy * ctx.width + cx;
+            if (mask[idx] === 0) {
+              mask[idx] = 1;
+              placed++;
+            }
+            const dir = Math.floor(rng() * 4);
+            if (dir === 0 && cx > 0) cx--;
+            else if (dir === 1 && cx < ctx.width - 1) cx++;
+            else if (dir === 2 && cy > 0) cy--;
+            else if (dir === 3 && cy < ctx.height - 1) cy++;
+          }
+        }
+        result = mask;
         break;
-      case 'placeNear':
-        runPlaceNearStep(grid, step, rng);
+      }
+
+      case 'gen.scatter': {
+        const density = Math.max(
+          0,
+          Math.min(
+            1,
+            numVal(
+              readInput(
+                nodeId,
+                'density',
+                typeof data.density === 'number' ? data.density : 0.1,
+                visiting
+              ),
+              0.1
+            )
+          )
+        );
+        const seedOffset = Number(data.seedOffset ?? 0);
+        const rng = createSeededRng(`${ctx.seed}:scatter:${nodeId}:${seedOffset}`);
+        const mask = new Float32Array(size);
+        for (let i = 0; i < size; i++) {
+          mask[i] = rng() < density ? 1 : 0;
+        }
+        result = mask;
         break;
+      }
+
+      case 'gen.distanceFromLayer': {
+        const layer = layerVal(readInput(nodeId, 'layer', undefined, visiting), size);
+        const maxDist = Math.max(1, Number(data.maxDistance ?? 5));
+        const dist = new Int16Array(size);
+        dist.fill(32767);
+        const queue: number[] = [];
+
+        for (let i = 0; i < size; i++) {
+          if (layer[i] >= 0) {
+            dist[i] = 0;
+            queue.push(i);
+          }
+        }
+
+        let head = 0;
+        while (head < queue.length) {
+          const cur = queue[head++];
+          const curDist = dist[cur];
+          if (curDist >= maxDist) continue;
+          const cx = cur % ctx.width;
+          const cy = Math.floor(cur / ctx.width);
+          const neighbors = [
+            [cx - 1, cy],
+            [cx + 1, cy],
+            [cx, cy - 1],
+            [cx, cy + 1],
+          ];
+          for (const [nx, ny] of neighbors) {
+            if (nx < 0 || ny < 0 || nx >= ctx.width || ny >= ctx.height) continue;
+            const nIdx = ny * ctx.width + nx;
+            if (dist[nIdx] > curDist + 1) {
+              dist[nIdx] = curDist + 1;
+              queue.push(nIdx);
+            }
+          }
+        }
+
+        const mask = new Float32Array(size);
+        for (let i = 0; i < size; i++) {
+          const d = Math.min(maxDist, dist[i]);
+          mask[i] = 1 - d / maxDist;
+        }
+        result = mask;
+        break;
+      }
+
+      case 'gen.threshold': {
+        const srcMask = maskVal(readInput(nodeId, 'mask', undefined, visiting), size);
+        const min = numVal(readInput(nodeId, 'min', typeof data.min === 'number' ? data.min : 0.5, visiting), 0.5);
+        const max = numVal(readInput(nodeId, 'max', typeof data.max === 'number' ? data.max : 1.0, visiting), 1.0);
+        const out = new Float32Array(size);
+        for (let i = 0; i < size; i++) {
+          const v = srcMask[i];
+          out[i] = v >= min && v <= max ? 1 : 0;
+        }
+        result = out;
+        break;
+      }
+
+      case 'gen.invert': {
+        const srcMask = maskVal(readInput(nodeId, 'mask', undefined, visiting), size);
+        const out = new Float32Array(size);
+        for (let i = 0; i < size; i++) {
+          out[i] = 1 - Math.max(0, Math.min(1, srcMask[i]));
+        }
+        result = out;
+        break;
+      }
+
+      case 'gen.maskCombine': {
+        const a = maskVal(readInput(nodeId, 'a', undefined, visiting), size);
+        const b = maskVal(readInput(nodeId, 'b', undefined, visiting), size);
+        const op = String(data.op ?? 'mul');
+        const out = new Float32Array(size);
+        for (let i = 0; i < size; i++) {
+          let v: number;
+          switch (op) {
+            case 'add':
+              v = a[i] + b[i];
+              break;
+            case 'sub':
+              v = a[i] - b[i];
+              break;
+            case 'min':
+              v = Math.min(a[i], b[i]);
+              break;
+            case 'max':
+              v = Math.max(a[i], b[i]);
+              break;
+            default:
+              v = a[i] * b[i];
+          }
+          out[i] = Math.max(0, Math.min(1, v));
+        }
+        result = out;
+        break;
+      }
+
+      case 'gen.fillLayer': {
+        const cellId = String(data.cellTypeId ?? '');
+        const cellIdx = ctx.cellIndexById.get(cellId) ?? -1;
+        const layer = new Int16Array(size);
+        layer.fill(cellIdx);
+        result = layer;
+        break;
+      }
+
+      case 'gen.paintLayer': {
+        const mask = maskVal(readInput(nodeId, 'mask', undefined, visiting), size);
+        const threshold = numVal(
+          readInput(nodeId, 'threshold', typeof data.threshold === 'number' ? data.threshold : 0.5, visiting),
+          0.5
+        );
+        const cellId = String(data.cellTypeId ?? '');
+        const cellIdx = ctx.cellIndexById.get(cellId) ?? -1;
+        const layer = new Int16Array(size);
+        layer.fill(-1);
+        if (cellIdx >= 0) {
+          for (let i = 0; i < size; i++) {
+            if (mask[i] >= threshold) {
+              layer[i] = cellIdx;
+            }
+          }
+        }
+        result = layer;
+        break;
+      }
+
+      case 'gen.mergeLayers': {
+        const base = layerVal(readInput(nodeId, 'base', undefined, visiting), size);
+        const overlay = layerVal(readInput(nodeId, 'overlay', undefined, visiting), size);
+        const out = new Int16Array(size);
+        for (let i = 0; i < size; i++) {
+          out[i] = overlay[i] >= 0 ? overlay[i] : base[i];
+        }
+        result = out;
+        break;
+      }
+
+      default:
+        result = 0;
     }
+
+    visiting.delete(cacheKey);
+    cache.set(cacheKey, result);
+    return result;
+  };
+
+  const finalLayer = layerVal(
+    readInput(outputNode.id, 'layer', undefined, new Set()),
+    size
+  );
+
+  for (let i = 0; i < size; i++) {
+    grid[i] = finalLayer[i] >= 0 ? finalLayer[i] : ctx.defaultCellIndex;
   }
 }

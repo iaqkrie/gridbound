@@ -1,9 +1,7 @@
 import { useRef, useState } from 'react';
 import {
   ArrowRight,
-  Copy,
   Dices,
-  Pencil,
   Play,
   Plus,
   Trash2,
@@ -11,19 +9,20 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
-import { SaveSlot } from '../engine/saveStore';
+import { SaveSlotRecord } from '../engine/saveStore';
 import {
-  RulesetEntry,
-  SetupParamManifest,
-  WorldSetupValues,
+  APP_VERSION,
   generateRandomSeed,
+  RuntimeValue,
+  SetupOptionManifest,
+  WorldSetupValues,
 } from '../engine/sdk';
 import { t } from '../i18n';
-import { RulesetImportResult } from '../rulesets';
+import { RulesetRegistryEntry } from '../rulesets';
 
 interface MainMenuProps {
-  rulesets: RulesetEntry[];
-  saves: SaveSlot[];
+  rulesets: RulesetRegistryEntry[];
+  saves: SaveSlotRecord[];
   defaultSaveName: string;
   onStartNewGame: (
     rulesetId: string,
@@ -32,34 +31,39 @@ interface MainMenuProps {
   ) => void;
   onLoadSave: (saveId: string) => void;
   onDeleteSave: (saveId: string) => void;
-  onImportRuleset: (rawJson: string) => RulesetImportResult;
+  onImportRuleset: (rawJson: string) => { ok: boolean; errors?: string[]; id?: string };
   onDeleteRuleset: (rulesetId: string) => void;
-  onCreateRuleset: () => void;
-  onEditRuleset: (rulesetId: string) => void;
-  onCloneRuleset: (rulesetId: string) => void;
+  onOpenStudio: (rulesetId: string) => void;
+  onCreateNewRuleset: () => void;
 }
+
+const MAP_SIZE_PRESETS = [
+  { id: 'small', name: 'Compact', width: 10, height: 10 },
+  { id: 'medium', name: 'Standard', width: 14, height: 14 },
+  { id: 'large', name: 'Expansive', width: 20, height: 20 },
+];
 
 function buildDefaultParams(
-  params?: SetupParamManifest[]
-): Record<string, string | number | boolean> {
-  const result: Record<string, string | number | boolean> = {};
-  for (const param of params ?? []) {
-    result[param.id] = param.defaultValue;
+  options?: SetupOptionManifest[]
+): Record<string, RuntimeValue> {
+  const out: Record<string, RuntimeValue> = {};
+  for (const opt of options ?? []) {
+    out[opt.id] = opt.defaultValue;
   }
-  return result;
+  return out;
 }
 
-function findDefaultMapSizeId(entry?: RulesetEntry): string {
-  if (!entry) return '';
-  const mapSizes = entry.manifest.setupOptions?.mapSizes;
-  if (!mapSizes || mapSizes.length === 0) return '';
-  const matched =
-    mapSizes.find(
-      (p) =>
-        p.width === entry.manifest.defaultGridSize.width &&
-        p.height === entry.manifest.defaultGridSize.height
-    ) ?? mapSizes[0];
-  return matched?.id ?? '';
+function formatSavedTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
 }
 
 export function MainMenu({
@@ -71,9 +75,8 @@ export function MainMenu({
   onDeleteSave,
   onImportRuleset,
   onDeleteRuleset,
-  onCreateRuleset,
-  onEditRuleset,
-  onCloneRuleset,
+  onOpenStudio,
+  onCreateNewRuleset,
 }: MainMenuProps) {
   const [selectedRulesetId, setSelectedRulesetId] = useState<string>(
     rulesets[0]?.manifest.id ?? ''
@@ -85,25 +88,25 @@ export function MainMenu({
   const selectedRuleset =
     rulesets.find((r) => r.manifest.id === selectedRulesetId) ?? rulesets[0];
 
-  const [selectedMapSizeId, setSelectedMapSizeId] = useState<string>(() =>
-    findDefaultMapSizeId(selectedRuleset)
+  const [gridWidth, setGridWidth] = useState<number>(
+    selectedRuleset?.manifest.defaultGridSize.width ?? 14
+  );
+  const [gridHeight, setGridHeight] = useState<number>(
+    selectedRuleset?.manifest.defaultGridSize.height ?? 14
   );
   const [seedInput, setSeedInput] = useState<string>('');
-  const [paramValues, setParamValues] = useState<
-    Record<string, string | number | boolean>
-  >(() => buildDefaultParams(selectedRuleset?.manifest.setupOptions?.params));
+  const [paramValues, setParamValues] = useState<Record<string, RuntimeValue>>(
+    () => buildDefaultParams(selectedRuleset?.manifest.setupOptions)
+  );
 
-  const mapSizes = selectedRuleset?.manifest.setupOptions?.mapSizes ?? [];
-  const activePreset =
-    mapSizes.find((p) => p.id === selectedMapSizeId) ?? mapSizes[0];
-  const setupParams = selectedRuleset?.manifest.setupOptions?.params ?? [];
-  const allowSeed = Boolean(selectedRuleset?.manifest.setupOptions?.allowSeed);
+  const setupOptions = selectedRuleset?.manifest.setupOptions ?? [];
 
-  const handleSelectRuleset = (entry: RulesetEntry) => {
+  const handleSelectRuleset = (entry: RulesetRegistryEntry) => {
     setImportErrors([]);
     setSelectedRulesetId(entry.manifest.id);
-    setSelectedMapSizeId(findDefaultMapSizeId(entry));
-    setParamValues(buildDefaultParams(entry.manifest.setupOptions?.params));
+    setGridWidth(entry.manifest.defaultGridSize.width);
+    setGridHeight(entry.manifest.defaultGridSize.height);
+    setParamValues(buildDefaultParams(entry.manifest.setupOptions));
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,8 +117,9 @@ export function MainMenu({
     try {
       const rawJson = await file.text();
       const result = onImportRuleset(rawJson);
-      if (result.ok && result.entry) {
-        handleSelectRuleset(result.entry);
+      if (result.ok && result.id) {
+        setImportErrors([]);
+        setSelectedRulesetId(result.id);
       } else {
         setImportErrors(
           result.errors && result.errors.length > 0
@@ -138,20 +142,15 @@ export function MainMenu({
     }
   };
 
-  const handleParamChange = (
-    paramId: string,
-    value: string | number | boolean
-  ) => {
+  const handleParamChange = (paramId: string, value: RuntimeValue) => {
     setParamValues((prev) => ({ ...prev, [paramId]: value }));
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedRuleset) return;
-    const width =
-      activePreset?.width ?? selectedRuleset.manifest.defaultGridSize.width;
-    const height =
-      activePreset?.height ?? selectedRuleset.manifest.defaultGridSize.height;
+    const width = Math.max(4, Math.min(64, Math.round(gridWidth)));
+    const height = Math.max(4, Math.min(64, Math.round(gridHeight)));
     const seed = seedInput.trim() || generateRandomSeed();
 
     onStartNewGame(
@@ -175,18 +174,9 @@ export function MainMenu({
             gridbound
           </span>
           <span className="font-mono tabular-nums text-[11px] text-[#8B98A9]">
-            v0.1.0-alpha
+            v{APP_VERSION}
           </span>
         </div>
-
-        <button
-          type="button"
-          onClick={onCreateRuleset}
-          className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-[#E6EDF3] bg-[#17202B] hover:bg-[#1F2A38] border border-[#2D3C4E] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
-        >
-          <Wrench className="w-3.5 h-3.5 text-[#10B981]" aria-hidden="true" />
-          <span>{t('menu.rulesetStudio')}</span>
-        </button>
       </header>
 
       {/* Main 2-column Tactical Workspace */}
@@ -223,14 +213,6 @@ export function MainMenu({
                     {t('menu.ruleset')}
                   </span>
                   <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={onCreateRuleset}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
-                    >
-                      <Plus className="w-3 h-3" aria-hidden="true" />
-                      <span>{t('menu.newRuleset')}</span>
-                    </button>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -240,8 +222,16 @@ export function MainMenu({
                     />
                     <button
                       type="button"
+                      onClick={onCreateNewRuleset}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded-md transition-colors cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" aria-hidden="true" />
+                      <span>New Ruleset</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer"
                     >
                       <Upload className="w-3 h-3" aria-hidden="true" />
                       <span>{t('menu.importJson')}</span>
@@ -254,14 +244,11 @@ export function MainMenu({
                     const manifest = entry.manifest;
                     const active = manifest.id === selectedRuleset?.manifest.id;
                     return (
-                      <div
-                        key={manifest.id}
-                        className="flex items-stretch gap-1.5"
-                      >
+                      <div key={manifest.id} className="flex items-stretch gap-1.5">
                         <button
                           type="button"
                           onClick={() => handleSelectRuleset(entry)}
-                          className={`flex-1 min-w-0 text-left px-4 py-3 rounded-md border transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
+                          className={`flex-1 min-w-0 text-left px-4 py-3 rounded-md border transition-colors cursor-pointer ${
                             active
                               ? 'bg-[#17202B] border-[#10B981]'
                               : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
@@ -272,56 +259,40 @@ export function MainMenu({
                               {manifest.name}
                             </span>
                             <span className="font-mono tabular-nums text-xs text-[#8B98A9] shrink-0">
-                              {active && activePreset
-                                ? `${activePreset.width}×${activePreset.height}`
+                              {active
+                                ? `${gridWidth}×${gridHeight}`
                                 : `${manifest.defaultGridSize.width}×${manifest.defaultGridSize.height}`}
                             </span>
                           </div>
+                          {manifest.description && (
+                            <p className="text-[11px] text-[#8B98A9] mt-1 line-clamp-2">
+                              {manifest.description}
+                            </p>
+                          )}
                         </button>
-
-                        {entry.isCustom && (
-                          <button
-                            type="button"
-                            onClick={() => onEditRuleset(manifest.id)}
-                            aria-label={t('menu.editRuleset', {
-                              name: manifest.name,
-                            })}
-                            title={t('menu.editRuleset', {
-                              name: manifest.name,
-                            })}
-                            className="px-2.5 text-[#8B98A9] hover:text-[#10B981] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
-                          >
-                            <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
-                          </button>
-                        )}
 
                         <button
                           type="button"
-                          onClick={() => onCloneRuleset(manifest.id)}
-                          aria-label={t('menu.cloneRuleset', {
-                            name: manifest.name,
-                          })}
-                          title={t('menu.cloneRuleset', {
-                            name: manifest.name,
-                          })}
-                          className="px-2.5 text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                          onClick={() => onOpenStudio(manifest.id)}
+                          title={
+                            entry.builtIn
+                              ? 'Inspect in Studio (Duplicate to edit)'
+                              : 'Edit in Studio'
+                          }
+                          className="inline-flex items-center gap-1.5 px-2.5 text-xs font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer whitespace-nowrap"
                         >
-                          <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                          <Wrench className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Studio</span>
                         </button>
 
-                        {entry.isCustom && (
+                        {!entry.builtIn && (
                           <button
                             type="button"
-                            onClick={() =>
-                              handleDeleteCustomRuleset(manifest.id)
-                            }
+                            onClick={() => handleDeleteCustomRuleset(manifest.id)}
                             aria-label={t('menu.deleteRuleset', {
                               name: manifest.name,
                             })}
-                            title={t('menu.deleteRuleset', {
-                              name: manifest.name,
-                            })}
-                            className="px-2.5 text-[#8B98A9] hover:text-[#F43F5E] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981]"
+                            className="px-2.5 text-[#8B98A9] hover:text-[#F43F5E] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md transition-colors cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                           </button>
@@ -355,88 +326,85 @@ export function MainMenu({
                           {err}
                         </li>
                       ))}
-                      {importErrors.length > 5 && (
-                        <li className="text-[#8B98A9]">
-                          {t('hud.moreNotifications', {
-                            count: importErrors.length - 5,
-                          })}
-                        </li>
-                      )}
                     </ul>
                   </div>
                 )}
               </div>
 
-              {mapSizes.length > 0 && (
-                <div>
-                  <div className="text-xs font-medium text-[#8B98A9] mb-2">
-                    {t('menu.mapSize')}
-                  </div>
-                  <div className="grid grid-cols-3 gap-2.5">
-                    {mapSizes.map((preset) => {
-                      const active = preset.id === activePreset?.id;
-                      return (
-                        <button
-                          key={preset.id}
-                          type="button"
-                          onClick={() => setSelectedMapSizeId(preset.id)}
-                          aria-pressed={active}
-                          className={`px-3 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
-                            active
-                              ? 'bg-[#17202B] border-[#10B981]'
-                              : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
-                          }`}
-                        >
-                          <div className="text-xs font-semibold text-[#E6EDF3]">
-                            {preset.name}
-                          </div>
-                          <div className="font-mono tabular-nums text-[11px] text-[#8B98A9] mt-0.5">
-                            {preset.width} × {preset.height}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+              {/* Map Size Presets */}
+              <div>
+                <div className="text-xs font-medium text-[#8B98A9] mb-2">
+                  {t('menu.mapSize')}
                 </div>
-              )}
+                <div className="grid grid-cols-3 gap-2.5">
+                  {MAP_SIZE_PRESETS.map((preset) => {
+                    const active =
+                      gridWidth === preset.width && gridHeight === preset.height;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setGridWidth(preset.width);
+                          setGridHeight(preset.height);
+                        }}
+                        aria-pressed={active}
+                        className={`px-3 py-2.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[#17202B] border-[#10B981]'
+                            : 'bg-[#0B0F14] border-[#1F2A38] hover:border-[#2D3C4E]'
+                        }`}
+                      >
+                        <div className="text-xs font-semibold text-[#E6EDF3]">
+                          {preset.name}
+                        </div>
+                        <div className="font-mono tabular-nums text-[11px] text-[#8B98A9] mt-0.5">
+                          {preset.width} × {preset.height}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-              {setupParams.length > 0 && (
+              {/* Ruleset Setup Options */}
+              {setupOptions.length > 0 && (
                 <div className="space-y-4">
-                  {setupParams.map((param) => {
-                    const value = paramValues[param.id] ?? param.defaultValue;
+                  {setupOptions.map((opt) => {
+                    const value = paramValues[opt.id] ?? opt.defaultValue;
 
-                    if (param.type === 'select') {
+                    if (opt.type === 'select' && opt.options) {
                       return (
-                        <div key={param.id}>
+                        <div key={opt.id}>
                           <div className="text-xs font-medium text-[#8B98A9] mb-2">
-                            {param.label}
+                            {opt.label}
                           </div>
                           <div
                             className="grid gap-2"
                             style={{
                               gridTemplateColumns: `repeat(${Math.min(
-                                param.options.length,
+                                opt.options.length,
                                 4
                               )}, minmax(0, 1fr))`,
                             }}
                           >
-                            {param.options.map((opt) => {
-                              const active = String(value) === opt.value;
+                            {opt.options.map((choice) => {
+                              const active = String(value) === choice.value;
                               return (
                                 <button
-                                  key={opt.value}
+                                  key={choice.value}
                                   type="button"
                                   onClick={() =>
-                                    handleParamChange(param.id, opt.value)
+                                    handleParamChange(opt.id, choice.value)
                                   }
                                   aria-pressed={active}
-                                  className={`px-3 py-2 rounded-md border text-xs font-medium text-center transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-[#10B981] ${
+                                  className={`px-3 py-2 rounded-md border text-xs font-medium text-center transition-colors cursor-pointer ${
                                     active
                                       ? 'bg-[#17202B] border-[#10B981] text-[#E6EDF3]'
                                       : 'bg-[#0B0F14] border-[#1F2A38] text-[#8B98A9] hover:text-[#E6EDF3] hover:border-[#2D3C4E]'
                                   }`}
                                 >
-                                  {opt.label}
+                                  {choice.label}
                                 </button>
                               );
                             })}
@@ -445,32 +413,29 @@ export function MainMenu({
                       );
                     }
 
-                    if (param.type === 'number') {
+                    if (opt.type === 'number') {
                       return (
-                        <div key={param.id}>
+                        <div key={opt.id}>
                           <label
-                            htmlFor={`setup-param-${param.id}`}
+                            htmlFor={`setup-opt-${opt.id}`}
                             className="flex items-center justify-between text-xs font-medium text-[#8B98A9] mb-2"
                           >
-                            <span>{param.label}</span>
+                            <span>{opt.label}</span>
                             <span className="font-mono tabular-nums text-[#E6EDF3]">
                               {Number(value)}
                             </span>
                           </label>
                           <input
-                            id={`setup-param-${param.id}`}
-                            type="number"
-                            min={param.min}
-                            max={param.max}
-                            step={param.step ?? 1}
+                            id={`setup-opt-${opt.id}`}
+                            type="range"
+                            min={opt.min ?? 0}
+                            max={opt.max ?? 10}
+                            step={opt.step ?? 0.1}
                             value={Number(value)}
                             onChange={(e) =>
-                              handleParamChange(
-                                param.id,
-                                Number(e.target.value)
-                              )
+                              handleParamChange(opt.id, Number(e.target.value))
                             }
-                            className="w-full bg-[#0B0F14] border border-[#1F2A38] focus:border-[#10B981] rounded-md px-3.5 py-2 text-sm font-mono tabular-nums text-[#E6EDF3] focus:outline-none transition-colors"
+                            className="w-full accent-[#10B981] cursor-pointer"
                           />
                         </div>
                       );
@@ -478,17 +443,17 @@ export function MainMenu({
 
                     return (
                       <label
-                        key={param.id}
+                        key={opt.id}
                         className="flex items-center justify-between gap-3 px-3.5 py-2.5 bg-[#0B0F14] border border-[#1F2A38] rounded-md cursor-pointer"
                       >
                         <span className="text-xs font-medium text-[#E6EDF3]">
-                          {param.label}
+                          {opt.label}
                         </span>
                         <input
                           type="checkbox"
                           checked={Boolean(value)}
                           onChange={(e) =>
-                            handleParamChange(param.id, e.target.checked)
+                            handleParamChange(opt.id, e.target.checked)
                           }
                           className="accent-[#10B981] w-4 h-4 cursor-pointer"
                         />
@@ -498,41 +463,40 @@ export function MainMenu({
                 </div>
               )}
 
-              {allowSeed && (
-                <div>
-                  <label
-                    htmlFor="world-seed-input"
-                    className="block text-xs font-medium text-[#8B98A9] mb-2"
+              {/* Seed */}
+              <div>
+                <label
+                  htmlFor="world-seed-input"
+                  className="block text-xs font-medium text-[#8B98A9] mb-2"
+                >
+                  {t('menu.seed')}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="world-seed-input"
+                    type="text"
+                    maxLength={32}
+                    value={seedInput}
+                    onChange={(e) => setSeedInput(e.target.value)}
+                    placeholder={t('menu.seedPlaceholder')}
+                    className="flex-1 bg-[#0B0F14] border border-[#1F2A38] focus:border-[#10B981] rounded-md px-3.5 py-2 text-xs font-mono text-[#E6EDF3] placeholder:text-[#8B98A9]/60 focus:outline-none transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setSeedInput(generateRandomSeed())}
+                    title={t('menu.randomizeSeed')}
+                    aria-label={t('menu.randomizeSeed')}
+                    className="px-3 py-2 bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md text-[#8B98A9] hover:text-[#E6EDF3] transition-colors cursor-pointer"
                   >
-                    {t('menu.seed')}
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      id="world-seed-input"
-                      type="text"
-                      maxLength={32}
-                      value={seedInput}
-                      onChange={(e) => setSeedInput(e.target.value)}
-                      placeholder={t('menu.seedPlaceholder')}
-                      className="flex-1 bg-[#0B0F14] border border-[#1F2A38] focus:border-[#10B981] rounded-md px-3.5 py-2 text-xs font-mono text-[#E6EDF3] placeholder:text-[#8B98A9]/60 focus:outline-none transition-colors"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setSeedInput(generateRandomSeed())}
-                      title={t('menu.randomizeSeed')}
-                      aria-label={t('menu.randomizeSeed')}
-                      className="px-3 py-2 bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] hover:border-[#2D3C4E] rounded-md text-[#8B98A9] hover:text-[#E6EDF3] transition-colors cursor-pointer"
-                    >
-                      <Dices className="w-4 h-4" aria-hidden="true" />
-                    </button>
-                  </div>
+                    <Dices className="w-4 h-4" aria-hidden="true" />
+                  </button>
                 </div>
-              )}
+              </div>
 
               <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded-md transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#111720] focus-visible:ring-[#10B981]"
+                  className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#0B0F14] bg-[#10B981] hover:bg-[#0EA572] rounded-md transition-colors cursor-pointer"
                 >
                   <Play className="w-4 h-4 fill-current" aria-hidden="true" />
                   <span>{t('menu.startGame')}</span>
@@ -562,6 +526,7 @@ export function MainMenu({
                   const matchedRuleset = rulesets.find(
                     (r) => r.manifest.id === slot.rulesetId
                   );
+                  const isMissingRuleset = !matchedRuleset;
                   return (
                     <div
                       key={slot.id}
@@ -575,47 +540,54 @@ export function MainMenu({
                           <span>
                             {t('common.cycle')} {slot.cycle}
                           </span>
-                          {(matchedRuleset?.manifest.resources ?? []).map(
-                            (res) => (
+                          {slot.hudSummary.map((item, i) => (
+                            <span
+                              key={`${item.label}-${i}`}
+                              className="inline-flex items-center gap-1.5"
+                            >
+                              <span aria-hidden="true">·</span>
                               <span
-                                key={res.id}
-                                className="inline-flex items-center gap-1.5"
+                                className="font-mono tabular-nums"
+                                style={{ color: item.color ?? '#E6EDF3' }}
                               >
-                                <span aria-hidden="true">·</span>
-                                <span
-                                  className="font-mono tabular-nums"
-                                  style={{ color: res.color }}
-                                >
-                                  {res.shortName ?? res.name}{' '}
-                                  {slot.resources[res.id] ?? 0}
-                                </span>
+                                {item.label} {String(item.value)}
                               </span>
-                            )
-                          )}
+                            </span>
+                          ))}
                         </div>
                         <div className="text-[11px] text-[#8B98A9] mt-1">
-                          {slot.rulesetName} · {slot.snapshot.width}×
-                          {slot.snapshot.height} · {slot.savedAt}
+                          {slot.rulesetName} · {slot.width}×{slot.height} ·{' '}
+                          {formatSavedTime(slot.savedAt)}
                         </div>
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
+                          disabled={isMissingRuleset}
                           onClick={() => onLoadSave(slot.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#E6EDF3] bg-[#17202B] hover:bg-[#1F2A38] border border-[#2D3C4E] rounded-md transition-colors cursor-pointer whitespace-nowrap"
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md border transition-colors whitespace-nowrap ${
+                            isMissingRuleset
+                              ? 'text-[#F43F5E]/80 bg-[#F43F5E]/10 border-[#F43F5E]/25 cursor-not-allowed'
+                              : 'text-[#E6EDF3] bg-[#17202B] hover:bg-[#1F2A38] border-[#2D3C4E] cursor-pointer'
+                          }`}
                         >
-                          <span>{t('menu.continue')}</span>
-                          <ArrowRight
-                            className="w-3.5 h-3.5"
-                            aria-hidden="true"
-                          />
+                          <span>
+                            {isMissingRuleset
+                              ? t('menu.rulesetMissing')
+                              : t('menu.continue')}
+                          </span>
+                          {!isMissingRuleset && (
+                            <ArrowRight
+                              className="w-3.5 h-3.5"
+                              aria-hidden="true"
+                            />
+                          )}
                         </button>
                         <button
                           type="button"
                           onClick={() => onDeleteSave(slot.id)}
                           aria-label={t('menu.deleteSave', { name: slot.name })}
-                          title={t('menu.deleteSave', { name: slot.name })}
                           className="p-1.5 text-[#8B98A9] hover:text-[#F43F5E] hover:bg-[#17202B] rounded-md transition-colors cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />

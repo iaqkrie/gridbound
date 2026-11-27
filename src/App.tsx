@@ -1,80 +1,67 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BuildMenu, BuildMenuState } from './components/BuildMenu';
 import { CanvasHudBottom } from './components/CanvasHudBottom';
-import { CellPanelView } from './components/CellPanelView';
-import { CellPopover } from './components/CellPopover';
-import {
-  DemolishConfirm,
-  DemolishMenuState,
-} from './components/DemolishConfirm';
 import { ExitConfirmModal } from './components/ExitConfirmModal';
 import { GridCanvas, GridCanvasHandle } from './components/GridCanvas';
 import { HoverCellCard } from './components/HoverCellCard';
+import {
+  ActiveInterfaceState,
+  InterfacePopover,
+} from './components/InterfacePopover';
 import { MainMenu } from './components/MainMenu';
 import { NotificationBanner } from './components/NotificationBanner';
 import { SupplyFilterOverlay } from './components/SupplyFilterOverlay';
 import { TopBar } from './components/TopBar';
-import {
-  EditorSelection,
-  RulesetEditor,
-} from './components/editor/RulesetEditor';
+import { RulesetStudio } from './components/studio/RulesetStudio';
+import { createStarterRuleset } from './components/studio/studioUtils';
 import { SimulationCore } from './engine/SimulationCore';
 import {
-  CellNotification,
   CellTypeId,
+  GameNotification,
+  generateRandomSeed,
   GridCoordinate,
+  InterfaceId,
   MouseButton,
-  RulesetEntry,
   RulesetManifest,
+  RuntimeValue,
   SupplyId,
   SupplyOverlayMode,
   WorldSetupValues,
-  generateRandomSeed,
 } from './engine/sdk';
-import { SaveSlot, saveStore } from './engine/saveStore';
-import { t } from './i18n';
-import { RulesetImportResult, rulesetStore } from './rulesets';
-import { SoundKind, playTacticalSound } from './utils/sound';
+import {
+  deleteSaveSlot,
+  listSaveSlots,
+  saveGameSlot,
+  SaveSlotRecord,
+} from './engine/saveStore';
+import {
+  deleteCustomRuleset,
+  getAllRulesets,
+  getRulesetById,
+  importRulesetJson,
+  RulesetRegistryEntry,
+  saveCustomRuleset,
+} from './rulesets';
+import { playTacticalSound } from './utils/sound';
 
-type ScreenMode = 'MENU' | 'PLAYING' | 'EDITOR' | 'EDITOR_PLAYTEST';
-
-interface CellPanelMenuState {
-  cellX: number;
-  cellY: number;
-  screenX: number;
-  screenY: number;
-}
-
-function buildDefaultSandboxSetup(manifest: RulesetManifest): WorldSetupValues {
-  const params: Record<string, string | number | boolean> = {};
-  for (const p of manifest.setupOptions?.params ?? []) {
-    params[p.id] = p.defaultValue;
-  }
-  return {
-    width: manifest.defaultGridSize.width,
-    height: manifest.defaultGridSize.height,
-    seed: generateRandomSeed(),
-    params,
-  };
-}
+type ScreenMode = 'MENU' | 'PLAYING' | 'STUDIO';
 
 export default function App() {
   const [screen, setScreen] = useState<ScreenMode>('MENU');
-  const [rulesets, setRulesets] = useState<RulesetEntry[]>(() =>
-    rulesetStore.list()
+  const [rulesets, setRulesets] = useState<RulesetRegistryEntry[]>(() =>
+    getAllRulesets()
   );
-  const [saves, setSaves] = useState<SaveSlot[]>(() => saveStore.list());
+  const [saves, setSaves] = useState<SaveSlotRecord[]>(() => listSaveSlots());
   const [activeSaveId, setActiveSaveId] = useState<string | null>(null);
   const [activeSaveName, setActiveSaveName] = useState<string>('');
   const [showExitConfirm, setShowExitConfirm] = useState(false);
 
-  // Ruleset Studio state (persisted across Test Play <-> Editor switches)
-  const [editorDraft, setEditorDraft] = useState<RulesetManifest | null>(null);
-  const [editorSourceId, setEditorSourceId] = useState<string | null>(null);
-  const [editorDirty, setEditorDirty] = useState(false);
-  const [editorSelection, setEditorSelection] = useState<EditorSelection>({
-    section: 'cells',
-  });
+  // Visual Ruleset Studio & ephemeral Playtest state
+  const [studioManifest, setStudioManifest] = useState<RulesetManifest | null>(
+    null
+  );
+  const [studioBuiltIn, setStudioBuiltIn] = useState(false);
+  const [studioDirty, setStudioDirty] = useState(false);
+  const [isPlaytest, setIsPlaytest] = useState(false);
 
   // Simulation runtime state
   const [core, setCore] = useState<SimulationCore | null>(null);
@@ -84,11 +71,8 @@ export default function App() {
   const [activeSupplyId, setActiveSupplyId] = useState<SupplyId | null>(null);
   const [zoomPercent, setZoomPercent] = useState(100);
   const [hoveredCell, setHoveredCell] = useState<GridCoordinate | null>(null);
-  const [buildMenu, setBuildMenu] = useState<BuildMenuState | null>(null);
-  const [panelMenu, setPanelMenu] = useState<CellPanelMenuState | null>(null);
-  const [demolishMenu, setDemolishMenu] = useState<DemolishMenuState | null>(
-    null
-  );
+  const [activeInterface, setActiveInterface] =
+    useState<ActiveInterfaceState | null>(null);
   const [focusedNotificationId, setFocusedNotificationId] = useState<
     string | null
   >(null);
@@ -103,9 +87,7 @@ export default function App() {
   const canvasRef = useRef<GridCanvasHandle>(null);
 
   const closeOverlays = useCallback(() => {
-    setBuildMenu(null);
-    setPanelMenu(null);
-    setDemolishMenu(null);
+    setActiveInterface(null);
     setPreviewCellTypeId(null);
   }, []);
 
@@ -114,150 +96,156 @@ export default function App() {
   }, []);
 
   const handleImportRuleset = useCallback(
-    (rawJson: string): RulesetImportResult => {
-      const result = rulesetStore.importFromJson(rawJson);
-      if (result.ok) {
-        setRulesets(rulesetStore.list());
+    (rawJson: string) => {
+      const result = importRulesetJson(rawJson);
+      if (result.manifest) {
+        saveCustomRuleset(result.manifest);
+        setRulesets(getAllRulesets());
         playTacticalSound('build', soundEnabled);
+        return { ok: true, id: result.manifest.id };
       }
-      return result;
+      return { ok: false, errors: result.errors };
     },
     [soundEnabled]
   );
 
   const handleDeleteRuleset = useCallback(
     (rulesetId: string) => {
-      if (rulesetStore.remove(rulesetId)) {
-        setRulesets(rulesetStore.list());
-        playTacticalSound('erase', soundEnabled);
-      }
+      deleteCustomRuleset(rulesetId);
+      setRulesets(getAllRulesets());
+      playTacticalSound('erase', soundEnabled);
     },
     [soundEnabled]
   );
 
   // ============================================================================
-  // Ruleset Studio Lifecycle Handlers
+  // Visual Ruleset Studio & Ephemeral Playtest Handlers
   // ============================================================================
 
-  const handleCreateRuleset = useCallback(() => {
-    const draft = rulesetStore.createBlankDraft();
-    setEditorDraft(draft);
-    setEditorSourceId(null);
-    setEditorDirty(true);
-    setEditorSelection({ section: 'cells', cellId: draft.cellTypes[0]?.id });
-    setScreen('EDITOR');
-    playTacticalSound('click', soundEnabled);
+  const handleOpenStudio = useCallback(
+    (rulesetId: string) => {
+      const entry = getAllRulesets().find((r) => r.manifest.id === rulesetId);
+      if (!entry) return;
+      setStudioManifest(JSON.parse(JSON.stringify(entry.manifest)));
+      setStudioBuiltIn(entry.builtIn);
+      setStudioDirty(false);
+      setIsPlaytest(false);
+      setScreen('STUDIO');
+      playTacticalSound('click', soundEnabled);
+    },
+    [soundEnabled]
+  );
+
+  const handleCreateNewRuleset = useCallback(() => {
+    const existingIds = getAllRulesets().map((r) => r.manifest.id);
+    const starter = createStarterRuleset(existingIds);
+    saveCustomRuleset(starter);
+    setRulesets(getAllRulesets());
+    setStudioManifest(starter);
+    setStudioBuiltIn(false);
+    setStudioDirty(false);
+    setIsPlaytest(false);
+    setScreen('STUDIO');
+    playTacticalSound('build', soundEnabled);
   }, [soundEnabled]);
 
-  const handleEditRuleset = useCallback(
-    (rulesetId: string) => {
-      const raw = rulesetStore.getById(rulesetId);
-      const copy: RulesetManifest = JSON.parse(JSON.stringify(raw));
-      setEditorDraft(copy);
-      setEditorSourceId(rulesetStore.isBuiltin(rulesetId) ? null : rulesetId);
-      setEditorDirty(false);
-      setEditorSelection({ section: 'cells', cellId: copy.cellTypes[0]?.id });
-      setScreen('EDITOR');
-      playTacticalSound('click', soundEnabled);
-    },
-    [soundEnabled]
-  );
-
-  const handleCloneRuleset = useCallback(
-    (rulesetId: string) => {
-      const copy = rulesetStore.cloneDraft(rulesetId);
-      setEditorDraft(copy);
-      setEditorSourceId(null);
-      setEditorDirty(true);
-      setEditorSelection({ section: 'cells', cellId: copy.cellTypes[0]?.id });
-      setScreen('EDITOR');
-      playTacticalSound('click', soundEnabled);
-    },
-    [soundEnabled]
-  );
-
-  const handleChangeDraft = useCallback((next: RulesetManifest) => {
-    setEditorDraft(next);
-    setEditorDirty(true);
-  }, []);
-
-  const handleSaveEditorDraft = useCallback((): {
-    ok: boolean;
-    errors?: string[];
-  } => {
-    if (!editorDraft) return { ok: false, errors: ['No active draft'] };
-    const result = rulesetStore.saveCustom(editorDraft, editorSourceId);
-    if (result.ok && result.entry) {
-      setRulesets(rulesetStore.list());
-      setEditorSourceId(result.entry.manifest.id);
-      setEditorDirty(false);
+  const handleSaveStudioRuleset = useCallback(
+    (manifest: RulesetManifest) => {
+      saveCustomRuleset(manifest);
+      setRulesets(getAllRulesets());
+      setStudioManifest(JSON.parse(JSON.stringify(manifest)));
+      setStudioDirty(false);
       playTacticalSound('build', soundEnabled);
-      return { ok: true };
-    }
-    return { ok: false, errors: result.errors };
-  }, [editorDraft, editorSourceId, soundEnabled]);
+    },
+    [soundEnabled]
+  );
 
-  const launchSandboxForDraft = useCallback(
-    (draft: RulesetManifest) => {
-      const setup = buildDefaultSandboxSetup(draft);
-      const sandboxCore = SimulationCore.createNewGame(draft, setup);
-      setCore(sandboxCore);
+  const handleDuplicateStudioRuleset = useCallback(
+    (copy: RulesetManifest) => {
+      saveCustomRuleset(copy);
+      setRulesets(getAllRulesets());
+      setStudioManifest(JSON.parse(JSON.stringify(copy)));
+      setStudioBuiltIn(false);
+      setStudioDirty(false);
+      playTacticalSound('build', soundEnabled);
+    },
+    [soundEnabled]
+  );
+
+  const handleTestPlay = useCallback(
+    (draftManifest: RulesetManifest, dirty: boolean) => {
+      const clonedDraft: RulesetManifest = JSON.parse(
+        JSON.stringify(draftManifest)
+      );
+      const defaultParams: Record<string, RuntimeValue> = {};
+      for (const opt of clonedDraft.setupOptions ?? []) {
+        defaultParams[opt.id] = opt.defaultValue;
+      }
+
+      const testCore = new SimulationCore(clonedDraft);
+      testCore.createNewGame({
+        width: clonedDraft.defaultGridSize.width,
+        height: clonedDraft.defaultGridSize.height,
+        seed: generateRandomSeed(),
+        setupParams: defaultParams,
+      });
+
+      const firstOverlaySupply = clonedDraft.supplies.find(
+        (s) => s.showInOverlay !== false
+      );
+
+      setStudioManifest(clonedDraft);
+      setStudioDirty(dirty);
+      setCore(testCore);
       setActiveSaveId(null);
-      setActiveSaveName(draft.name);
+      setActiveSaveName(`${clonedDraft.name} · Playtest`);
+      setIsPlaytest(true);
       setOverlayMode('off');
-      setActiveSupplyId(draft.supplies[0]?.id ?? null);
+      setActiveSupplyId(firstOverlaySupply?.id ?? null);
       setHoveredCell(null);
       setFocusedNotificationId(null);
       setHighlightedCell(null);
       setShowExitConfirm(false);
       closeOverlays();
-      setScreen('EDITOR_PLAYTEST');
+      setScreen('PLAYING');
       setRenderVersion((v) => v + 1);
       playTacticalSound('build', soundEnabled);
     },
     [closeOverlays, soundEnabled]
   );
 
-  const handleStartTestPlay = useCallback(() => {
-    if (!editorDraft) return;
-    launchSandboxForDraft(editorDraft);
-  }, [editorDraft, launchSandboxForDraft]);
-
-  const handleRerollSandboxSeed = useCallback(() => {
-    if (!editorDraft) return;
-    launchSandboxForDraft(editorDraft);
-  }, [editorDraft, launchSandboxForDraft]);
-
-  const handleBackToEditor = useCallback(() => {
-    closeOverlays();
-    setHoveredCell(null);
-    setFocusedNotificationId(null);
-    setHighlightedCell(null);
-    setScreen('EDITOR');
-    playTacticalSound('click', soundEnabled);
-  }, [closeOverlays, soundEnabled]);
-
-  const handleExitEditor = useCallback(() => {
-    setScreen('MENU');
-    playTacticalSound('click', soundEnabled);
-  }, [soundEnabled]);
-
   // ============================================================================
-  // Standard Game Lifecycle Handlers
+  // Game Lifecycle Handlers
   // ============================================================================
 
   const handleStartNewGame = useCallback(
     (rulesetId: string, saveName: string, setup: WorldSetupValues) => {
-      const manifest = rulesetStore.getById(rulesetId);
-      const nextCore = SimulationCore.createNewGame(manifest, setup);
-      const slot = saveStore.create(saveName, nextCore);
+      const manifest = getRulesetById(rulesetId);
+      if (!manifest) return;
+      const nextCore = new SimulationCore(manifest);
+      nextCore.createNewGame({
+        width: setup.width,
+        height: setup.height,
+        seed: setup.seed,
+        setupParams: setup.params,
+      });
 
-      setSaves(saveStore.list());
+      const slot = saveGameSlot(
+        nextCore.serialize(),
+        manifest,
+        undefined,
+        saveName
+      );
+      const firstOverlaySupply = manifest.supplies.find(
+        (s) => s.showInOverlay !== false
+      );
+
+      setSaves(listSaveSlots());
       setCore(nextCore);
       setActiveSaveId(slot.id);
       setActiveSaveName(slot.name);
       setOverlayMode('off');
-      setActiveSupplyId(manifest.supplies[0]?.id ?? null);
+      setActiveSupplyId(firstOverlaySupply?.id ?? null);
       setHoveredCell(null);
       setFocusedNotificationId(null);
       setHighlightedCell(null);
@@ -272,16 +260,23 @@ export default function App() {
 
   const handleLoadSave = useCallback(
     (saveId: string) => {
-      const slot = saveStore.get(saveId);
+      const slot = listSaveSlots().find((s) => s.id === saveId);
       if (!slot) return;
-      const manifest = rulesetStore.getById(slot.rulesetId);
-      const loadedCore = SimulationCore.deserialize(manifest, slot.snapshot);
+      const manifest = getRulesetById(slot.rulesetId);
+      if (!manifest) return;
+
+      const loadedCore = new SimulationCore(manifest);
+      loadedCore.deserialize(slot.snapshot);
+
+      const firstOverlaySupply = manifest.supplies.find(
+        (s) => s.showInOverlay !== false
+      );
 
       setCore(loadedCore);
       setActiveSaveId(slot.id);
       setActiveSaveName(slot.name);
       setOverlayMode('off');
-      setActiveSupplyId(manifest.supplies[0]?.id ?? null);
+      setActiveSupplyId(firstOverlaySupply?.id ?? null);
       setHoveredCell(null);
       setFocusedNotificationId(null);
       setHighlightedCell(null);
@@ -296,41 +291,47 @@ export default function App() {
 
   const handleDeleteSave = useCallback(
     (saveId: string) => {
-      saveStore.remove(saveId);
-      setSaves(saveStore.list());
+      deleteSaveSlot(saveId);
+      setSaves(listSaveSlots());
       playTacticalSound('erase', soundEnabled);
     },
     [soundEnabled]
   );
 
   const handleRequestExit = useCallback(() => {
-    if (screen === 'EDITOR_PLAYTEST') {
-      handleBackToEditor();
+    closeOverlays();
+    if (isPlaytest) {
+      setHoveredCell(null);
+      setFocusedNotificationId(null);
+      setHighlightedCell(null);
+      setShowExitConfirm(false);
+      setIsPlaytest(false);
+      setScreen('STUDIO');
+      playTacticalSound('click', soundEnabled);
       return;
     }
-    closeOverlays();
     setShowExitConfirm(true);
-  }, [screen, handleBackToEditor, closeOverlays]);
+  }, [closeOverlays, isPlaytest, soundEnabled]);
 
   const handleSaveAndExit = useCallback(() => {
     if (core && activeSaveId) {
-      saveStore.update(activeSaveId, core);
+      saveGameSlot(core.serialize(), core.manifest, activeSaveId, activeSaveName);
     }
     setShowExitConfirm(false);
     setHoveredCell(null);
     setFocusedNotificationId(null);
     setHighlightedCell(null);
-    setSaves(saveStore.list());
+    setSaves(listSaveSlots());
     setScreen('MENU');
     playTacticalSound('click', soundEnabled);
-  }, [core, activeSaveId, soundEnabled]);
+  }, [core, activeSaveId, activeSaveName, soundEnabled]);
 
   const handleExitWithoutSaving = useCallback(() => {
     setShowExitConfirm(false);
     setHoveredCell(null);
     setFocusedNotificationId(null);
     setHighlightedCell(null);
-    setSaves(saveStore.list());
+    setSaves(listSaveSlots());
     setScreen('MENU');
     playTacticalSound('click', soundEnabled);
   }, [soundEnabled]);
@@ -345,6 +346,10 @@ export default function App() {
     playTacticalSound('step', soundEnabled);
   }, [core, closeOverlays, bumpRender, soundEnabled]);
 
+  // ============================================================================
+  // Cell Click & Universal Interface Continuation Flow
+  // ============================================================================
+
   const handleCellClick = useCallback(
     (
       x: number,
@@ -353,7 +358,7 @@ export default function App() {
       screenX: number,
       screenY: number
     ) => {
-      if (!core) return;
+      if (!core || button === 'middle') return;
       setHighlightedCell(null);
       setFocusedNotificationId(null);
 
@@ -362,46 +367,15 @@ export default function App() {
         bumpRender();
       }
 
-      const uiAction = res.uiAction;
-      if (uiAction?.type === 'openBuildMenu') {
-        setPanelMenu(null);
-        setDemolishMenu(null);
-        setBuildMenu({
-          cellX: x,
-          cellY: y,
+      if (res.uiRequest) {
+        setPreviewCellTypeId(null);
+        setActiveInterface({
+          cellX: res.uiRequest.cellX,
+          cellY: res.uiRequest.cellY,
           screenX,
           screenY,
-          options: uiAction.options,
-        });
-        setPreviewCellTypeId(null);
-        playTacticalSound('click', soundEnabled);
-      } else if (uiAction?.type === 'openPanel') {
-        const cellType = core.getCellTypeAt(x, y);
-        if (!cellType.panel || cellType.panel.length === 0) {
-          closeOverlays();
-          return;
-        }
-        setBuildMenu(null);
-        setDemolishMenu(null);
-        setPreviewCellTypeId(null);
-        setPanelMenu({
-          cellX: x,
-          cellY: y,
-          screenX,
-          screenY,
-        });
-        playTacticalSound('click', soundEnabled);
-      } else if (uiAction?.type === 'openDemolishConfirm') {
-        const cellType = core.getCellTypeAt(x, y);
-        setBuildMenu(null);
-        setPanelMenu(null);
-        setPreviewCellTypeId(null);
-        setDemolishMenu({
-          cellX: x,
-          cellY: y,
-          screenX,
-          screenY,
-          cellType,
+          interfaceId: res.uiRequest.interfaceId,
+          params: res.uiRequest.params,
         });
         playTacticalSound('click', soundEnabled);
       } else {
@@ -414,40 +388,86 @@ export default function App() {
     [core, closeOverlays, bumpRender, soundEnabled]
   );
 
-  const handleBuildSelect = useCallback(
-    (cellTypeId: CellTypeId) => {
-      if (!core || !buildMenu) return;
-      const res = core.buildCell(buildMenu.cellX, buildMenu.cellY, cellTypeId);
-      if (!res.ok) return;
-      closeOverlays();
-      bumpRender();
-      playTacticalSound('build', soundEnabled);
-    },
-    [core, buildMenu, closeOverlays, bumpRender, soundEnabled]
-  );
-
-  const handlePanelMutated = useCallback(
-    (sound?: SoundKind) => {
-      bumpRender();
-      if (sound) {
-        playTacticalSound(sound, soundEnabled);
+  const handleResolveInterface = useCallback(
+    (result: RuntimeValue) => {
+      if (!core) return;
+      const res = core.resolveActiveInterface(result);
+      if (res.mutated) {
+        bumpRender();
+        playTacticalSound('build', soundEnabled);
+      }
+      if (res.uiRequest) {
+        setActiveInterface((prev) =>
+          prev
+            ? {
+                ...prev,
+                cellX: res.uiRequest!.cellX,
+                cellY: res.uiRequest!.cellY,
+                interfaceId: res.uiRequest!.interfaceId,
+                params: res.uiRequest!.params,
+              }
+            : null
+        );
+      } else {
+        closeOverlays();
       }
     },
-    [bumpRender, soundEnabled]
+    [core, bumpRender, closeOverlays, soundEnabled]
   );
 
-  const handleConfirmDemolish = useCallback(() => {
-    if (!core || !demolishMenu) return;
-    const res = core.demolishCell(demolishMenu.cellX, demolishMenu.cellY);
-    closeOverlays();
-    if (res.ok) {
-      bumpRender();
-      playTacticalSound('erase', soundEnabled);
+  const handleCancelInterface = useCallback(() => {
+    if (core) {
+      const res = core.cancelActiveInterface();
+      if (res.mutated) {
+        bumpRender();
+      }
     }
-  }, [core, demolishMenu, closeOverlays, bumpRender, soundEnabled]);
+    closeOverlays();
+  }, [core, bumpRender, closeOverlays]);
+
+  const handleTriggerInterfaceAction = useCallback(
+    (interfaceId: InterfaceId, actionId: string, value?: RuntimeValue) => {
+      if (!core || !activeInterface) return;
+      const res = core.triggerInterfaceAction(
+        interfaceId,
+        actionId,
+        activeInterface.cellX,
+        activeInterface.cellY,
+        activeInterface.params,
+        value
+      );
+      if (res.mutated) {
+        bumpRender();
+        playTacticalSound('click', soundEnabled);
+      }
+      if (res.uiRequest) {
+        setActiveInterface((prev) =>
+          prev
+            ? {
+                ...prev,
+                cellX: res.uiRequest!.cellX,
+                cellY: res.uiRequest!.cellY,
+                interfaceId: res.uiRequest!.interfaceId,
+                params: res.uiRequest!.params,
+              }
+            : null
+        );
+      } else if (res.closeInterface) {
+        closeOverlays();
+      }
+    },
+    [core, activeInterface, bumpRender, closeOverlays, soundEnabled]
+  );
 
   const handleFocusNotification = useCallback(
-    (notification: CellNotification) => {
+    (notification: GameNotification) => {
+      if (
+        notification.scope !== 'cell' ||
+        notification.x === undefined ||
+        notification.y === undefined
+      ) {
+        return;
+      }
       closeOverlays();
       setFocusedNotificationId(notification.id);
       setHighlightedCell({ x: notification.x, y: notification.y });
@@ -470,13 +490,35 @@ export default function App() {
     [core, focusedNotificationId, bumpRender]
   );
 
-  const handleViewportResize = useCallback((width: number, height: number) => {
-    setViewportSize({ width, height });
+  const syncOverlayPositions = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setActiveInterface((prev) => {
+      if (!prev) return null;
+      const pos = canvas.getCellScreenPosition(prev.cellX, prev.cellY);
+      return { ...prev, screenX: pos.x, screenY: pos.y };
+    });
   }, []);
 
-  const isGameActive = screen === 'PLAYING' || screen === 'EDITOR_PLAYTEST';
+  const handleZoomChange = useCallback(
+    (nextZoomPercent: number) => {
+      setZoomPercent(nextZoomPercent);
+      syncOverlayPositions();
+    },
+    [syncOverlayPositions]
+  );
 
-  // Global keyboard shortcuts during active game or sandbox playtest
+  const handleViewportResize = useCallback(
+    (width: number, height: number) => {
+      setViewportSize({ width, height });
+      syncOverlayPositions();
+    },
+    [syncOverlayPositions]
+  );
+
+  const isGameActive = screen === 'PLAYING';
+
+  // Global keyboard shortcuts during active game
   useEffect(() => {
     if (!isGameActive) return;
 
@@ -495,7 +537,7 @@ export default function App() {
         if (showExitConfirm) {
           setShowExitConfirm(false);
         } else {
-          closeOverlays();
+          handleCancelInterface();
           setHighlightedCell(null);
           setFocusedNotificationId(null);
         }
@@ -510,7 +552,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isGameActive, showExitConfirm, closeOverlays, handleNextTurn]);
+  }, [isGameActive, showExitConfirm, handleCancelInterface, handleNextTurn]);
 
   const stats = useMemo(() => {
     if (!core) return null;
@@ -520,45 +562,28 @@ export default function App() {
 
   const notifications = useMemo(() => {
     if (!core) return [];
-    return core.getNotifications();
+    return core.notifications;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [core, renderVersion]);
 
   const inspectedCoord = hoveredCell ?? highlightedCell;
 
-  const inspection = useMemo(() => {
-    if (!core || !inspectedCoord) return null;
-    return core.inspectCell(inspectedCoord.x, inspectedCoord.y);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [core, inspectedCoord?.x, inspectedCoord?.y, renderVersion]);
-
-  const panelMenuCellType = useMemo(() => {
-    if (!core || !panelMenu) return null;
-    return core.getCellTypeAt(panelMenu.cellX, panelMenu.cellY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [core, panelMenu?.cellX, panelMenu?.cellY, renderVersion]);
-
-  const demolishInfo = useMemo(() => {
-    if (!core || !demolishMenu) return { lines: [], warnings: [] };
-    return core.getDemolishInfo(demolishMenu.cellX, demolishMenu.cellY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [core, demolishMenu?.cellX, demolishMenu?.cellY, renderVersion]);
-
-  // ============================================================================
-  // Screen Routing
-  // ============================================================================
-
-  if (screen === 'EDITOR' && editorDraft) {
+  if (screen === 'STUDIO' && studioManifest) {
     return (
-      <RulesetEditor
-        draft={editorDraft}
-        isDirty={editorDirty}
-        selection={editorSelection}
-        onChangeDraft={handleChangeDraft}
-        onChangeSelection={setEditorSelection}
-        onSave={handleSaveEditorDraft}
-        onTestPlay={handleStartTestPlay}
-        onExit={handleExitEditor}
+      <RulesetStudio
+        initialManifest={studioManifest}
+        builtIn={studioBuiltIn}
+        initialDirty={studioDirty}
+        existingRulesetIds={rulesets.map((r) => r.manifest.id)}
+        onSaveCustom={handleSaveStudioRuleset}
+        onDuplicateToCustom={handleDuplicateStudioRuleset}
+        onTestPlay={handleTestPlay}
+        onBackToMenu={() => {
+          setStudioDirty(false);
+          setRulesets(getAllRulesets());
+          setScreen('MENU');
+          playTacticalSound('click', soundEnabled);
+        }}
       />
     );
   }
@@ -568,44 +593,38 @@ export default function App() {
       <MainMenu
         rulesets={rulesets}
         saves={saves}
-        defaultSaveName={saveStore.nextDefaultName()}
+        defaultSaveName={`Colony ${saves.length + 1}`}
         onStartNewGame={handleStartNewGame}
         onLoadSave={handleLoadSave}
         onDeleteSave={handleDeleteSave}
         onImportRuleset={handleImportRuleset}
         onDeleteRuleset={handleDeleteRuleset}
-        onCreateRuleset={handleCreateRuleset}
-        onEditRuleset={handleEditRuleset}
-        onCloneRuleset={handleCloneRuleset}
+        onOpenStudio={handleOpenStudio}
+        onCreateNewRuleset={handleCreateNewRuleset}
       />
     );
   }
 
-  const isSandbox = screen === 'EDITOR_PLAYTEST';
-
+  const overlaySupplies = core.manifest.supplies.filter(
+    (s) => s.showInOverlay !== false
+  );
   const resolvedSupplyId =
-    activeSupplyId &&
-    core.manifest.supplies.some((s) => s.id === activeSupplyId)
+    activeSupplyId && overlaySupplies.some((s) => s.id === activeSupplyId)
       ? activeSupplyId
-      : (core.manifest.supplies[0]?.id ?? null);
+      : (overlaySupplies[0]?.id ?? null);
 
-  const selectedCell = buildMenu
-    ? { x: buildMenu.cellX, y: buildMenu.cellY }
-    : panelMenu
-      ? { x: panelMenu.cellX, y: panelMenu.cellY }
-      : demolishMenu
-        ? { x: demolishMenu.cellX, y: demolishMenu.cellY }
-        : null;
+  const selectedCell = activeInterface
+    ? { x: activeInterface.cellX, y: activeInterface.cellY }
+    : null;
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0B0F14] text-[#E6EDF3] overflow-hidden">
       <TopBar
         saveName={activeSaveName}
-        resources={core.manifest.resources}
+        globalState={core.manifest.globalState}
         stats={stats}
-        isSandbox={isSandbox}
+        exitLabel={isPlaytest ? 'Back to Studio' : undefined}
         onRequestExit={handleRequestExit}
-        onRerollSeed={isSandbox ? handleRerollSandboxSeed : undefined}
         onNextTurn={handleNextTurn}
       />
 
@@ -622,24 +641,24 @@ export default function App() {
           onHoverCell={setHoveredCell}
           onCellClick={handleCellClick}
           onBackgroundClick={() => {
-            closeOverlays();
+            handleCancelInterface();
             setHighlightedCell(null);
             setFocusedNotificationId(null);
           }}
-          onZoomChange={setZoomPercent}
+          onZoomChange={handleZoomChange}
           onViewportResize={handleViewportResize}
         />
 
         {/* Top-Left: Supply Filters */}
         <SupplyFilterOverlay
-          supplies={core.manifest.supplies}
+          supplies={overlaySupplies}
           activeSupplyId={resolvedSupplyId}
           overlayMode={overlayMode}
           onSelectSupply={setActiveSupplyId}
           onChangeOverlayMode={setOverlayMode}
         />
 
-        {/* Top-Center: Clickable Cell Notifications */}
+        {/* Top-Center: Global & Clickable Cell Notifications */}
         <NotificationBanner
           notifications={notifications}
           focusedNotificationId={focusedNotificationId}
@@ -647,13 +666,10 @@ export default function App() {
           onDismissNotification={handleDismissNotification}
         />
 
-        {/* Top-Right: Compact Hover Cell Brief */}
-        <HoverCellCard
-          inspection={inspection}
-          supplies={core.manifest.supplies}
-        />
+        {/* Top-Right: Ruleset/Cell Hover Interface */}
+        <HoverCellCard core={core} coord={inspectedCoord} />
 
-        {/* Bottom-Left (Cursor Cell Coords) & Bottom-Right (Zoom + Sound) */}
+        {/* Bottom-Left (Cursor Coords) & Bottom-Right (Zoom + Sound) */}
         <CanvasHudBottom
           hoveredCell={hoveredCell}
           zoomPercent={zoomPercent}
@@ -664,71 +680,22 @@ export default function App() {
           onToggleSound={() => setSoundEnabled((prev) => !prev)}
         />
 
-        {/* Contextual Popovers */}
-        {buildMenu && (
-          <BuildMenu
-            menu={buildMenu}
-            manifest={core.manifest}
-            cellTypes={core.getCellTypes()}
-            checkAffordability={(cellTypeId) => core.canAfford(cellTypeId)}
-            getBuildPreview={(cellTypeId) =>
-              core.getBuildPreview(
-                buildMenu.cellX,
-                buildMenu.cellY,
-                cellTypeId
-              )
-            }
+        {/* Universal Built-in & Custom Node-Powered Interface Popover */}
+        {activeInterface && (
+          <InterfacePopover
+            active={activeInterface}
+            core={core}
             containerWidth={viewportSize.width}
             containerHeight={viewportSize.height}
-            onSelect={handleBuildSelect}
-            onHoverOption={setPreviewCellTypeId}
-            onClose={closeOverlays}
-          />
-        )}
-
-        {panelMenu &&
-          panelMenuCellType &&
-          panelMenuCellType.panel &&
-          panelMenuCellType.panel.length > 0 && (
-            <CellPopover
-              title={panelMenuCellType.name}
-              swatchColor={panelMenuCellType.visual.color}
-              cellX={panelMenu.cellX}
-              cellY={panelMenu.cellY}
-              screenX={panelMenu.screenX}
-              screenY={panelMenu.screenY}
-              containerWidth={viewportSize.width}
-              containerHeight={viewportSize.height}
-              width={272}
-              estimatedHeight={220}
-              ariaLabel={panelMenuCellType.name}
-              closeAriaLabel={t('common.close')}
-              onClose={closeOverlays}
-            >
-              <CellPanelView
-                core={core}
-                x={panelMenu.cellX}
-                y={panelMenu.cellY}
-                cellType={panelMenuCellType}
-                onMutated={handlePanelMutated}
-                onClose={closeOverlays}
-              />
-            </CellPopover>
-          )}
-
-        {demolishMenu && (
-          <DemolishConfirm
-            menu={demolishMenu}
-            demolishInfo={demolishInfo}
-            containerWidth={viewportSize.width}
-            containerHeight={viewportSize.height}
-            onConfirm={handleConfirmDemolish}
-            onClose={closeOverlays}
+            onResolve={handleResolveInterface}
+            onCancel={handleCancelInterface}
+            onTriggerAction={handleTriggerInterfaceAction}
+            onHoverCellOption={setPreviewCellTypeId}
           />
         )}
       </main>
 
-      {showExitConfirm && !isSandbox && (
+      {showExitConfirm && (
         <ExitConfirmModal
           saveName={activeSaveName}
           cycle={stats.cycle}

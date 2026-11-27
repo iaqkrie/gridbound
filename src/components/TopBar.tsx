@@ -1,29 +1,30 @@
-import { ArrowLeft, Dices, SkipForward } from 'lucide-react';
-import { ResourceManifest, SimulationStats } from '../engine/sdk';
+import { ArrowLeft, SkipForward } from 'lucide-react';
+import {
+  GlobalStateManifest,
+  SimulationStats,
+} from '../engine/sdk';
 import { t } from '../i18n';
 
 interface TopBarProps {
   saveName: string;
-  resources: readonly ResourceManifest[];
+  globalState: GlobalStateManifest;
   stats: SimulationStats;
-  isSandbox?: boolean;
+  exitLabel?: string;
   onRequestExit: () => void;
-  onRerollSeed?: () => void;
   onNextTurn: () => void;
 }
 
 export function TopBar({
   saveName,
-  resources,
+  globalState,
   stats,
-  isSandbox = false,
+  exitLabel,
   onRequestExit,
-  onRerollSeed,
   onNextTurn,
 }: TopBarProps) {
   return (
     <header className="h-14 shrink-0 bg-[#111720] border-b border-[#1F2A38] px-4 flex items-center justify-between gap-4 select-none">
-      {/* Zone 1: Menu/Editor Back button + Title (+ Sandbox New Seed) */}
+      {/* Zone 1: Menu Back button + Save Name */}
       <div className="flex items-center gap-3 min-w-0 shrink-0">
         <button
           type="button"
@@ -31,9 +32,7 @@ export function TopBar({
           className="inline-flex items-center gap-1.5 text-xs font-medium text-[#8B98A9] hover:text-[#E6EDF3] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#10B981] rounded px-1.5 py-1"
         >
           <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>
-            {isSandbox ? t('sandbox.backToEditor') : t('common.menu')}
-          </span>
+          <span>{exitLabel ?? t('common.menu')}</span>
         </button>
         <span className="text-[#1F2A38]" aria-hidden="true">
           /
@@ -41,35 +40,38 @@ export function TopBar({
         <span className="text-sm font-semibold text-[#E6EDF3] whitespace-nowrap truncate max-w-[160px]">
           {saveName}
         </span>
-
-        {isSandbox && onRerollSeed && (
-          <button
-            type="button"
-            onClick={onRerollSeed}
-            title={t('sandbox.newSeed')}
-            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-[#8B98A9] hover:text-[#E6EDF3] bg-[#0B0F14] hover:bg-[#17202B] border border-[#1F2A38] rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <Dices className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{t('sandbox.newSeed')}</span>
-          </button>
-        )}
       </div>
 
-      {/* Zone 2: Global Resources & Cycle Counter */}
+      {/* Zone 2: GlobalState HUD Items & Cycle Counter */}
       <div className="flex items-center gap-4 text-xs whitespace-nowrap overflow-x-auto no-scrollbar">
-        {resources.map((res) => {
-          const amount = stats.resources[res.id] ?? 0;
-          const cap = stats.resourceCaps[res.id] ?? null;
-          const delta = stats.projectedDelta[res.id] ?? 0;
-          const breakdown = stats.projectedBreakdown[res.id];
+        {globalState.hud.map((hudItem) => {
+          const varDef = globalState.variables.find(
+            (v) => v.id === hudItem.variableId
+          );
+          if (!varDef) return null;
+
+          const rawVal = stats.globalValues[varDef.id] ?? varDef.initialValue;
+          const isNum = varDef.type === 'number';
+          const numVal = isNum ? Number(rawVal) : 0;
+          const showCap = Boolean(hudItem.showCap && varDef.hasCap);
+          const cap = showCap ? (stats.globalCaps[varDef.id] ?? 0) : null;
+          const showDelta = Boolean(hudItem.showDelta && isNum);
+          const delta = showDelta ? (stats.projectedDelta[varDef.id] ?? 0) : 0;
+          const breakdown = showDelta
+            ? stats.projectedBreakdown[varDef.id]
+            : undefined;
 
           const hasBreakdownActivity =
             breakdown && (breakdown.gained > 0 || breakdown.consumed > 0);
-          const isCappedOverflow = cap !== null && amount >= cap && delta > 0;
+          const isCappedOverflow = cap !== null && numVal >= cap && delta > 0;
+
+          const label = hudItem.label ?? varDef.shortName ?? varDef.name;
+          const color = hudItem.color ?? varDef.color ?? '#8B98A9';
+
           const tooltipParts = [
             cap !== null
-              ? `${res.name}: ${amount} / ${cap}`
-              : `${res.name}: ${amount}`,
+              ? `${varDef.name}: ${String(rawVal)} / ${cap}`
+              : `${varDef.name}: ${String(rawVal)}`,
           ];
           if (hasBreakdownActivity) {
             tooltipParts.push(
@@ -82,35 +84,37 @@ export function TopBar({
 
           return (
             <div
-              key={res.id}
+              key={hudItem.variableId}
               className="flex items-baseline gap-1.5 shrink-0"
               title={tooltipParts.join(' · ')}
             >
               <span
                 className="w-1.5 h-1.5 rounded-[1px] self-center shrink-0"
-                style={{ backgroundColor: res.color }}
+                style={{ backgroundColor: color }}
                 aria-hidden="true"
               />
-              <span className="text-[#8B98A9]">
-                {res.shortName ?? res.name}
-              </span>
+              <span className="text-[#8B98A9]">{label}</span>
               <span
                 className={`font-mono tabular-nums text-sm font-semibold ${
-                  amount < 0
+                  isNum && numVal < 0
                     ? 'text-[#F43F5E]'
                     : isCappedOverflow
                       ? 'text-[#F59E0B]'
                       : 'text-[#E6EDF3]'
                 }`}
               >
-                {amount}
+                {typeof rawVal === 'boolean'
+                  ? rawVal
+                    ? t('common.on')
+                    : 'OFF'
+                  : String(rawVal)}
                 {cap !== null && (
                   <span className="text-[#8B98A9] font-normal text-xs">
                     /{cap}
                   </span>
                 )}
               </span>
-              {delta !== 0 ? (
+              {showDelta && delta !== 0 ? (
                 <span
                   className={`font-mono tabular-nums text-[11px] ${
                     delta > 0 ? 'text-[#10B981]' : 'text-[#F43F5E]'
@@ -118,7 +122,7 @@ export function TopBar({
                 >
                   {delta > 0 ? `+${delta}` : `−${Math.abs(delta)}`}
                 </span>
-              ) : hasBreakdownActivity ? (
+              ) : showDelta && hasBreakdownActivity ? (
                 <span className="font-mono tabular-nums text-[11px] text-[#8B98A9]">
                   0
                 </span>

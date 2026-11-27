@@ -11,10 +11,6 @@ export const en = {
   'menu.newGame': 'New Game',
   'menu.saveName': 'Save Name',
   'menu.ruleset': 'Ruleset',
-  'menu.rulesetStudio': 'Ruleset Studio',
-  'menu.newRuleset': 'New',
-  'menu.editRuleset': 'Edit {name}',
-  'menu.cloneRuleset': 'Clone & edit {name}',
   'menu.importJson': 'Import JSON',
   'menu.deleteRuleset': 'Remove {name}',
   'menu.importErrorTitle': 'Invalid ruleset JSON',
@@ -26,27 +22,9 @@ export const en = {
   'menu.saves': 'Saves',
   'menu.noSaves': 'No saves yet',
   'menu.continue': 'Continue',
+  'menu.rulesetMissing': 'Ruleset missing',
   'menu.deleteSave': 'Delete save {name}',
   'menu.defaultSaveName': 'Colony #{n}',
-
-  // Ruleset Studio Editor
-  'editor.save': 'Save',
-  'editor.saved': 'Saved',
-  'editor.testPlay': 'Test Play',
-  'editor.importJson': 'Import',
-  'editor.exportJson': 'Export JSON',
-  'editor.sectionGeneral': 'General',
-  'editor.sectionResources': 'Resources',
-  'editor.sectionSupplies': 'Supplies',
-  'editor.sectionGenerator': 'World Generator',
-  'editor.sectionCells': 'Cells',
-  'editor.unsavedTitle': 'Unsaved Changes',
-  'editor.saveAndExit': 'Save & Exit',
-  'editor.discardAndExit': 'Discard & Exit',
-
-  // Sandbox Playtest
-  'sandbox.backToEditor': 'Back to Editor',
-  'sandbox.newSeed': 'New Seed',
 
   // Exit Modal
   'exit.title': 'Return to Menu',
@@ -68,12 +46,8 @@ export const en = {
   'hud.moreNotifications': '+{count} more',
   'hud.cycleBreakdown': '+{gained} / −{consumed} per cycle',
 
-  // Build & Demolish
-  'build.title': 'Build',
+  // Interface Blocks (Options & Exit Previews)
   'build.missing': 'Need: {list}',
-  'demolish.title': 'Demolish {name}?',
-  'demolish.confirm': 'Demolish',
-  'demolish.aria': 'Demolish {name}',
   'demolish.reclaimWarning': '{count} {key} will be unassigned',
   'demolish.capOverflowWarning': '{excess} {resource} will be lost',
 
@@ -87,7 +61,6 @@ export const en = {
   'inspect.needSupply': 'No {name}',
   'inspect.needResource': 'No {name}',
   'inspect.needState': 'Needs {key}',
-  'inspect.needNeighbor': 'Needs {name}',
   'inspect.inactive': 'Inactive',
   'inspect.selectResource': 'Select resource',
   'inspect.capBonusPreview': '+{amount} max cap',

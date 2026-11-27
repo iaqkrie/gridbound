@@ -1,85 +1,76 @@
-import { t } from '../i18n';
-import { SimulationCore } from './SimulationCore';
-import { ResourceId, SerializedSimulationState } from './sdk';
+import { RulesetManifest, RuntimeValue, SerializedSimulationState } from './sdk';
 
-export interface SaveSlot {
+const SAVES_STORAGE_KEY = 'gridbound_saves_v4';
+
+export interface SaveSlotRecord {
   id: string;
   name: string;
   rulesetId: string;
   rulesetName: string;
+  savedAt: number;
   cycle: number;
-  resources: Record<ResourceId, number>;
-  savedAt: string;
+  width: number;
+  height: number;
+  hudSummary: { label: string; value: RuntimeValue; color?: string }[];
   snapshot: SerializedSimulationState;
 }
 
-class InMemorySaveStore {
-  private slots: SaveSlot[] = [];
-  private sequence = 1;
-
-  public nextDefaultName(): string {
-    return t('menu.defaultSaveName', { n: this.sequence });
-  }
-
-  public list(): SaveSlot[] {
-    return [...this.slots];
-  }
-
-  public get(id: string): SaveSlot | undefined {
-    return this.slots.find((s) => s.id === id);
-  }
-
-  public create(name: string, core: SimulationCore): SaveSlot {
-    const cleanName = name.trim() || this.nextDefaultName();
-    this.sequence += 1;
-
-    const slot: SaveSlot = {
-      id: `save-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      name: cleanName,
-      rulesetId: core.manifest.id,
-      rulesetName: core.manifest.name,
-      cycle: core.cycle,
-      resources: core.getResources(),
-      savedAt: formatSaveTime(new Date()),
-      snapshot: core.serialize(),
-    };
-
-    this.slots = [slot, ...this.slots];
-    return slot;
-  }
-
-  public update(id: string, core: SimulationCore): SaveSlot | null {
-    const idx = this.slots.findIndex((s) => s.id === id);
-    if (idx === -1) return null;
-
-    const updated: SaveSlot = {
-      ...this.slots[idx],
-      cycle: core.cycle,
-      resources: core.getResources(),
-      savedAt: formatSaveTime(new Date()),
-      snapshot: core.serialize(),
-    };
-
-    this.slots = [
-      updated,
-      ...this.slots.slice(0, idx),
-      ...this.slots.slice(idx + 1),
-    ];
-    return updated;
-  }
-
-  public remove(id: string): void {
-    this.slots = this.slots.filter((s) => s.id !== id);
+export function listSaveSlots(): SaveSlotRecord[] {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
+  try {
+    const raw = window.localStorage.getItem(SAVES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s) => s && s.snapshot?.version === 4)
+      .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
+  } catch {
+    return [];
   }
 }
 
-function formatSaveTime(date: Date): string {
-  return date.toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
+export function saveGameSlot(
+  snapshot: SerializedSimulationState,
+  manifest: RulesetManifest,
+  slotId?: string,
+  customName?: string
+): SaveSlotRecord {
+  const existing = listSaveSlots();
+  const id = slotId ?? `save_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const prev = existing.find((s) => s.id === id);
+
+  const hudSummary = manifest.globalState.hud.slice(0, 4).map((item) => {
+    const varDef = manifest.globalState.variables.find((v) => v.id === item.variableId);
+    return {
+      label: item.label ?? varDef?.shortName ?? varDef?.name ?? item.variableId,
+      value: snapshot.globalValues[item.variableId] ?? 0,
+      color: item.color ?? varDef?.color,
+    };
   });
+
+  const record: SaveSlotRecord = {
+    id,
+    name: customName ?? prev?.name ?? `${manifest.name} · Cycle ${snapshot.cycle}`,
+    rulesetId: manifest.id,
+    rulesetName: manifest.name,
+    savedAt: Date.now(),
+    cycle: snapshot.cycle,
+    width: snapshot.width,
+    height: snapshot.height,
+    hudSummary,
+    snapshot,
+  };
+
+  const next = [record, ...existing.filter((s) => s.id !== id)];
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.setItem(SAVES_STORAGE_KEY, JSON.stringify(next));
+  }
+  return record;
 }
 
-export const saveStore = new InMemorySaveStore();
+export function deleteSaveSlot(id: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const next = listSaveSlots().filter((s) => s.id !== id);
+  window.localStorage.setItem(SAVES_STORAGE_KEY, JSON.stringify(next));
+}

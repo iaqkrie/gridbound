@@ -15,6 +15,7 @@ interface CellPopoverProps {
   ariaLabel: string;
   closeAriaLabel: string;
   swatchColor?: string;
+  spriteUrl?: string;
   onClose: () => void;
   children: ReactNode;
 }
@@ -33,6 +34,7 @@ export function CellPopover({
   ariaLabel,
   closeAriaLabel,
   swatchColor,
+  spriteUrl,
   onClose,
   children,
 }: CellPopoverProps) {
@@ -81,13 +83,21 @@ export function CellPopover({
     >
       <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[#1F2A38]">
         <div className="flex items-center gap-2 text-xs min-w-0">
-          {swatchColor && (
+          {spriteUrl ? (
+            <img
+              src={spriteUrl}
+              alt=""
+              className="w-4 h-4 rounded-[2px] shrink-0 border border-white/10 bg-[#0B0F14]"
+              style={{ imageRendering: 'pixelated' }}
+              aria-hidden="true"
+            />
+          ) : swatchColor ? (
             <span
               className="w-2.5 h-2.5 rounded-[2px] shrink-0 border border-white/15"
               style={{ backgroundColor: swatchColor }}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           <span className="font-semibold text-[#E6EDF3] truncate">{title}</span>
           <span className="text-[#8B98A9] shrink-0" aria-hidden="true">
             ·

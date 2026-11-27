@@ -121,6 +121,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
         highlightedCell,
         hoveredCell: hoveredCellRef.current,
         previewCellTypeId,
+        onSpriteLoaded: () => drawRef.current(),
       });
     }, [
       core,
@@ -239,7 +240,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
           const prevW = viewportRef.current.width;
           const prevH = viewportRef.current.height;
           viewportRef.current = { width, height };
-          onViewportResize(width, height);
           if (!initialized) {
             initialized = true;
             lastFittedCoreRef.current = core;
@@ -249,6 +249,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(
             cameraRef.current.offsetY += (height - prevH) / 2;
             drawRef.current();
           }
+          onViewportResize(width, height);
         }
       });
 

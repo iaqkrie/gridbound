@@ -21,7 +21,8 @@ export function SupplyFilterOverlay({
   onSelectSupply,
   onChangeOverlayMode,
 }: SupplyFilterOverlayProps) {
-  if (supplies.length === 0) return null;
+  const visibleSupplies = supplies.filter((s) => s.showInOverlay !== false);
+  if (visibleSupplies.length === 0) return null;
 
   const isOff = overlayMode === 'off';
 
@@ -77,7 +78,7 @@ export function SupplyFilterOverlay({
       </div>
 
       <div className="flex flex-col gap-1">
-        {supplies.map((s) => {
+        {visibleSupplies.map((s) => {
           const active = !isOff && activeSupplyId === s.id;
           return (
             <button

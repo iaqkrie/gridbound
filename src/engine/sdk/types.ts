@@ -1,37 +1,44 @@
-import type { SoundKind } from '../../utils/sound';
-import type { CellIcon } from './icons';
-
 // ============================================================================
-// Primitive Identifiers & Shared Types
+// Gridbound SDK — Core Schema v4 (0.1.0-alpha.1)
+// Node-Native Engine Core, GlobalState Access Control, Unified Numeric Supplies,
+// 32×32 PNG Sprite Registry, Layer/Mask World Generator & Universal Interfaces
 // ============================================================================
 
-export type SupplyId = string;
+export const APP_VERSION = '0.1.0-alpha.1';
+export const CURRENT_SCHEMA_VERSION = 4 as const;
+
 export type CellTypeId = string;
-export type ResourceId = string;
+export type SupplyId = string;
+export type GlobalVarId = string;
+export type SpriteId = string;
+export type InterfaceId = string;
 
-export type NeighborhoodType = 'moore' | 'vonNeumann' | 'self';
-export type MouseButton = 'left' | 'right' | 'middle';
-export type SupplyOverlayMode = 'off' | 'heatmap' | 'numbers';
+export type AccessLevel = 'public' | 'readonly' | 'private';
+export type ValueType = 'number' | 'boolean' | 'string';
+export type RuntimeValue = number | boolean | string;
 
-export type ResourceDelta = Record<ResourceId, number>;
-export type CellStateValue = number | string | boolean;
-export type CellStateData = Record<string, CellStateValue>;
-export type StatusTone = 'neutral' | 'positive' | 'warning' | 'danger';
-export type NotificationSeverity = 'warning' | 'danger';
-export type CompareOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte';
+export type CompareOp = '==' | '!=' | '>' | '>=' | '<' | '<=';
 
-export interface StatusBadge {
-  text: string;
-  tone: StatusTone;
+// ============================================================================
+// 1. Sprites & Runtime Cell Visuals (32×32 PNG)
+// ============================================================================
+
+export interface SpriteAssetManifest {
+  id: SpriteId;
+  name: string;
+  width: 32;
+  height: 32;
+  dataUrl: string;
 }
 
-export interface GridCoordinate {
-  x: number;
-  y: number;
+export interface CellVisualState {
+  spriteId: SpriteId | null;
+  tintColor: string | null;
+  opacity: number;
 }
 
 // ============================================================================
-// Decay Rules (used by Supplies and optionally by Global Resources)
+// 2. Decay & Unified Numeric Supplies
 // ============================================================================
 
 export type DecayRule =
@@ -40,44 +47,10 @@ export type DecayRule =
   | { kind: 'linear'; amount: number }
   | {
       kind: 'percent';
-      /** Fraction retained each cycle, e.g. 0.5 keeps 50% */
       retainRatio: number;
       round?: 'floor' | 'ceil' | 'round';
-      /** Minimum decay step when value > 0 */
       minStep?: number;
     };
-
-// ============================================================================
-// Global Resources — Strictly 2 kinds: 'unlimited' | 'capped'
-// ============================================================================
-
-interface BaseResourceManifest {
-  id: ResourceId;
-  name: string;
-  shortName?: string;
-  description?: string;
-  color: string;
-  initialValue: number;
-  tags?: string[];
-  decay?: DecayRule;
-}
-
-export interface UnlimitedResourceManifest extends BaseResourceManifest {
-  kind: 'unlimited';
-}
-
-export interface CappedResourceManifest extends BaseResourceManifest {
-  kind: 'capped';
-  initialMax: number;
-}
-
-export type ResourceManifest =
-  | UnlimitedResourceManifest
-  | CappedResourceManifest;
-
-// ============================================================================
-// Spatial Supplies
-// ============================================================================
 
 export interface SupplyManifest {
   id: SupplyId;
@@ -87,506 +60,349 @@ export interface SupplyManifest {
   maxExpected: number;
   maxAmount?: number;
   decay: DecayRule;
+  showInOverlay?: boolean;
 }
 
-export interface SupplyEmission {
-  id: SupplyId;
-  amount: number;
-  radius: number;
-  neighborhood: NeighborhoodType;
-  includeSelf?: boolean;
-}
+export type EmitArea =
+  | { shape: 'self' }
+  | { shape: 'moore'; radius: number }
+  | { shape: 'vonNeumann'; radius: number }
+  | { shape: 'coords'; x: number; y: number }
+  | { shape: 'relative'; dx: number; dy: number };
 
 // ============================================================================
-// Setup Options & Declarative World Generator Pipeline
+// 3. Node Graph IR (Unified across Cell, Global, Interface & WorldGenerator)
 // ============================================================================
 
-export interface MapSizePreset {
+export type GraphScope = 'cell' | 'global' | 'interface' | 'generator';
+
+export type PortType =
+  | 'exec'
+  | 'number'
+  | 'boolean'
+  | 'string'
+  | 'any'
+  | 'mask'
+  | 'layer';
+
+export interface GraphNode {
   id: string;
+  type: string;
+  data?: Record<string, unknown>;
+  position?: { x: number; y: number };
+}
+
+export interface GraphEdge {
+  id: string;
+  fromNode: string;
+  fromPort: string;
+  toNode: string;
+  toPort: string;
+}
+
+export interface NodeGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+// ============================================================================
+// 4. GlobalState (Variables, Access Control, HUD Config & World Graph)
+// ============================================================================
+
+export interface GlobalVariableManifest {
+  id: GlobalVarId;
   name: string;
-  width: number;
-  height: number;
-}
-
-export type SetupParamManifest =
-  | {
-      id: string;
-      label: string;
-      type: 'select';
-      defaultValue: string;
-      options: { value: string; label: string }[];
-    }
-  | {
-      id: string;
-      label: string;
-      type: 'number';
-      defaultValue: number;
-      min: number;
-      max: number;
-      step?: number;
-    }
-  | {
-      id: string;
-      label: string;
-      type: 'boolean';
-      defaultValue: boolean;
-    };
-
-export interface SetupOptionsManifest {
-  mapSizes?: MapSizePreset[];
-  allowSeed?: boolean;
-  params?: SetupParamManifest[];
-}
-
-export interface WorldSetupValues {
-  width: number;
-  height: number;
-  seed: string;
-  params: Record<string, string | number | boolean>;
-}
-
-export type GeneratorStep =
-  | {
-      type: 'fill';
-      cell: CellTypeId;
-    }
-  | {
-      type: 'clusters';
-      cell: CellTypeId;
-      clustersPer768: number;
-      minClusters?: number;
-      minSize: number;
-      maxSize: number;
-      onlyOnEmpty?: boolean;
-      densityParam?: string;
-    }
-  | {
-      type: 'scatter';
-      cell: CellTypeId;
-      countPer768: number;
-      minCount?: number;
-      onlyOnEmpty?: boolean;
-      densityParam?: string;
-    }
-  | {
-      type: 'placeNear';
-      cell: CellTypeId;
-      nearCell: CellTypeId;
-      radius?: number;
-      neighborhood?: 'moore' | 'vonNeumann';
-      chance: number;
-      maxCount?: number;
-      onlyOnEmpty?: boolean;
-    };
-
-export interface GridMutator {
-  readonly width: number;
-  readonly height: number;
-  readonly defaultCellTypeId: CellTypeId;
-  clear: () => void;
-  getCell: (x: number, y: number) => CellTypeId;
-  setCell: (x: number, y: number, cellTypeId: CellTypeId) => void;
-}
-
-export type SeededRng = () => number;
-
-// ============================================================================
-// Declarative Condition Primitives
-// ============================================================================
-
-export type Condition =
-  | {
-      type: 'supply';
-      id: SupplyId;
-      op: CompareOp;
-      value: number;
-    }
-  | {
-      type: 'resource';
-      id: ResourceId;
-      op: CompareOp;
-      value: number;
-    }
-  | {
-      type: 'state';
-      key: string;
-      op: CompareOp;
-      value: CellStateValue;
-    }
-  | {
-      type: 'neighbors';
-      cell: CellTypeId;
-      op: CompareOp;
-      value: number;
-      radius?: number;
-      neighborhood?: 'moore' | 'vonNeumann';
-    }
-  | {
-      type: 'chance';
-      probability: number;
-    }
-  | {
-      type: 'any';
-      conditions: Condition[];
-    }
-  | {
-      type: 'not';
-      condition: Condition;
-    };
-
-// ============================================================================
-// Declarative Action Primitives & Rules
-// ============================================================================
-
-export type UiClickAction =
-  | { type: 'openBuildMenu'; options: CellTypeId[] }
-  | { type: 'openPanel' }
-  | { type: 'openDemolishConfirm' };
-
-export type Action =
-  | { type: 'addResource'; id: ResourceId; amount: number }
-  | { type: 'consumeResource'; id: ResourceId; amount: number }
-  | { type: 'consumeSupply'; id: SupplyId; amount: number }
-  | {
-      type: 'emitSupply';
-      id: SupplyId;
-      amount: number;
-      radius: number;
-      neighborhood: NeighborhoodType;
-      includeSelf?: boolean;
-    }
-  | { type: 'setState'; key: string; value: CellStateValue }
-  | {
-      type: 'addState';
-      key: string;
-      amount: number;
-      min?: number;
-      max?: number;
-    }
-  | { type: 'transform'; to: CellTypeId }
-  | {
-      type: 'notify';
-      severity: NotificationSeverity;
-      title: string;
-      message: string;
-    }
-  | {
-      type: 'refundStateToResource';
-      stateKey: string;
-      resourceId: ResourceId;
-    }
-  | {
-      type: 'reclaimResource';
-      resourceId: ResourceId;
-      amount: number;
-      fallbackStateKey?: string;
-    }
-  | UiClickAction;
-
-export interface Rule {
-  when?: Condition[];
-  do: Action[];
-  else?: Action[];
-  stop?: boolean;
-  label?: string;
-  tone?: StatusTone;
-}
-
-// ============================================================================
-// Passive Cell Modifiers
-// ============================================================================
-
-export type CellModifier = {
-  type: 'capBonus';
-  resource?: ResourceId;
-  resourceFromState?: string;
-  amount: number;
-};
-
-// ============================================================================
-// Declarative Visuals, Conditional Styles & Indicators
-// ============================================================================
-
-export type { CellIcon } from './icons';
-
-export type ValidationSection =
-  | 'general'
-  | 'resources'
-  | 'supplies'
-  | 'generator'
-  | 'cells';
-
-export interface ValidationIssue {
-  section: ValidationSection;
-  cellId?: CellTypeId;
-  path: string;
-  message: string;
-}
-
-export interface VisualRule {
-  when?: Condition[];
+  shortName?: string;
+  description?: string;
+  type: ValueType;
+  initialValue: RuntimeValue;
+  hasCap?: boolean;
+  initialMax?: number;
+  allowNegative?: boolean;
+  decay?: DecayRule;
+  access: AccessLevel;
   color?: string;
-  icon?: CellIcon;
-  glyph?: string;
-  border?: 'solid' | 'dashed';
-  dim?: boolean;
+  tags?: string[];
 }
 
-export type VisualIndicator =
-  | {
-      kind: 'dot';
-      position: 'bottomRight' | 'topLeft' | 'bottomLeft';
-      when?: Condition[];
-      color: string;
-      inactiveColor?: string;
-    }
-  | {
-      kind: 'bar';
-      when?: Condition[];
-      color?: string;
-      colorFromResourceState?: string;
-    };
-
-export interface CellVisualManifest {
-  color: string;
-  icon?: CellIcon;
-  /** Optional 1-2 character symbol or letter rendered centered on the cell */
-  glyph?: string;
-  /** Render full-tile fill (ideal for terrain) instead of inset frame (structures) */
-  fullTile?: boolean;
-  /** Optional custom SVG path in a 24x24 viewBox rendered via Canvas Path2D */
-  svgPath?: string;
-  /** Optional background substrate color tint */
-  substrateColor?: string;
-  border?: 'solid' | 'dashed';
-  dim?: boolean;
-  rules?: VisualRule[];
-  indicators?: VisualIndicator[];
+export interface HudItemManifest {
+  variableId: GlobalVarId;
+  label?: string;
+  color?: string;
+  showCap?: boolean;
+  showDelta?: boolean;
 }
 
-export interface ResolvedVisualState {
-  color: string;
-  icon?: CellIcon;
-  glyph?: string;
-  fullTile?: boolean;
-  svgPath?: string;
-  substrateColor?: string;
-  border: 'solid' | 'dashed';
-  dim: boolean;
-  indicators: ResolvedVisualIndicator[];
-}
-
-export type ResolvedVisualIndicator =
-  | {
-      kind: 'dot';
-      position: 'bottomRight' | 'topLeft' | 'bottomLeft';
-      filled: boolean;
-      color: string;
-    }
-  | {
-      kind: 'bar';
-      color: string;
-    };
-
-export interface CellBadgeRule {
-  when?: Condition[];
-  text: string;
-  tone?: StatusTone;
+export interface GlobalStateManifest {
+  variables: GlobalVariableManifest[];
+  hud: HudItemManifest[];
+  graph: NodeGraph;
 }
 
 // ============================================================================
-// Declarative Cell UI Panel Blocks
+// 5. Setup Options
 // ============================================================================
 
-export type PanelBlock =
+export interface SetupOptionManifest {
+  id: string;
+  label: string;
+  description?: string;
+  type: 'number' | 'boolean' | 'select';
+  defaultValue: RuntimeValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: { value: string; label: string }[];
+}
+
+// ============================================================================
+// 6. Universal Interfaces (Built-in Templates + Custom Node-Driven Interfaces)
+// ============================================================================
+
+export type BuiltinInterfaceId =
+  | '@builtin/cell_picker'
+  | '@builtin/confirm'
+  | '@builtin/inspector';
+
+export type InterfaceRole = 'popover' | 'modal' | 'hover';
+
+export interface UiCondition {
+  source: 'state' | 'global' | 'globalCap' | 'supply' | 'param' | 'setup';
+  key: string;
+  op: CompareOp;
+  value: RuntimeValue;
+}
+
+export interface UiButtonDef {
+  label: string;
+  actionId?: string;
+  closeResult?: RuntimeValue;
+  variant?: 'primary' | 'secondary' | 'danger';
+  disabledWhen?: UiCondition[];
+  visibleWhen?: UiCondition[];
+}
+
+export type InterfaceBlock =
   | {
-      type: 'stat';
+      kind: 'text';
+      text: string;
+      tone?: 'default' | 'muted' | 'accent' | 'positive' | 'warning' | 'danger';
+      visibleWhen?: UiCondition[];
+    }
+  | {
+      kind: 'stat';
       label: string;
-      /** Template string (e.g. "{{supply.moisture}}", "{{state.idle}} cycles") or "cycleOutput" */
       value: string;
-      when?: Condition[];
-      tone?: StatusTone;
-      toneWhen?: { when: Condition[]; tone: StatusTone }[];
+      tone?: 'default' | 'muted' | 'accent' | 'positive' | 'warning' | 'danger';
+      visibleWhen?: UiCondition[];
     }
   | {
-      type: 'transfer';
+      kind: 'button';
       label: string;
-      resource: ResourceId;
-      stateKey: string;
-      min: number;
-      max: number;
-      step?: number;
-      assignLabel?: string;
-      removeLabel?: string;
-      resetKeys?: string[];
-      clearNotifications?: boolean;
+      actionId?: string;
+      closeResult?: RuntimeValue;
+      variant?: 'primary' | 'secondary' | 'danger';
+      disabledWhen?: UiCondition[];
+      visibleWhen?: UiCondition[];
     }
   | {
-      type: 'resourceSelect';
+      kind: 'buttonRow';
+      buttons: UiButtonDef[];
+      visibleWhen?: UiCondition[];
+    }
+  | {
+      kind: 'selectList';
       label?: string;
-      bonusText?: string;
-      stateKey: string;
-      kind?: 'capped' | 'unlimited';
-      tag?: string;
+      actionId: string;
+      source: 'globalVars' | 'static';
+      filterTag?: string;
+      filterHasCap?: boolean;
+      selectedStateKey?: string;
+      options?: { value: string; label: string; subtitle?: string; color?: string }[];
+      visibleWhen?: UiCondition[];
     }
   | {
-      type: 'actionButton';
-      label: string;
-      when?: Condition[];
-      cost?: ResourceDelta;
-      do: Action[];
-      tone?: 'primary' | 'neutral' | 'danger';
-      closeAfter?: boolean;
-      sound?: SoundKind;
+      kind: 'cellStateList';
+      excludeKeys?: string[];
+      visibleWhen?: UiCondition[];
+    }
+  | {
+      kind: 'supplyList';
+      onlyPositive?: boolean;
+      visibleWhen?: UiCondition[];
     };
 
+export interface InterfaceManifest {
+  id: InterfaceId;
+  title: string;
+  subtitle?: string;
+  width?: number;
+  role?: InterfaceRole;
+  showSwatch?: boolean;
+  blocks: InterfaceBlock[];
+  graph?: NodeGraph;
+}
+
+// Payload shapes for built-in interfaces
+export interface CellPickerOption {
+  cellId: CellTypeId;
+  label?: string;
+  subtitle?: string;
+  badge?: string;
+  badgeTone?: 'default' | 'positive' | 'warning' | 'danger';
+  disabled?: boolean;
+  /** Optional simple requirements checked dynamically against global vars */
+  requires?: { varId: GlobalVarId; min: number }[];
+}
+
+export interface ConfirmLine {
+  text: string;
+  tone?: 'default' | 'muted' | 'positive' | 'warning' | 'danger';
+}
+
+export interface OpenInterfaceRequest {
+  interfaceId: InterfaceId;
+  cellX: number;
+  cellY: number;
+  params: Record<string, unknown>;
+}
+
 // ============================================================================
-// Cell Type & Top-Level Ruleset Manifest (Schema v2)
+// 7. Cell Types & State Schema
 // ============================================================================
+
+export interface StateFieldManifest {
+  key: string;
+  label?: string;
+  type: ValueType;
+  initialValue: RuntimeValue;
+  access: AccessLevel;
+}
 
 export interface CellTypeManifest {
   id: CellTypeId;
   name: string;
   description?: string;
-  shortRule?: string;
-  initialState?: CellStateData;
-  buildCost?: ResourceDelta;
-  demolishTo?: CellTypeId;
+  defaultSpriteId: SpriteId | null;
+  defaultColor: string;
+  defaultOpacity?: number;
+  substrateSpriteId?: SpriteId | null;
+  stateSchema: StateFieldManifest[];
+  /** Higher state value executes earlier in Phase 4 (React) */
   priorityByState?: string;
-  modifiers?: CellModifier[];
-  visual: CellVisualManifest;
-  badges?: CellBadgeRule[];
-  onClick?: {
-    left?: Rule[];
-    right?: Rule[];
-  };
-  onBuild?: Rule[];
-  onCycle?: Rule[];
-  onDemolish?: Rule[];
-  onLost?: Rule[];
-  panel?: PanelBlock[];
+  /** undefined = inherit ruleset.defaultHoverInterfaceId; null = disable hover card */
+  hoverInterfaceId?: InterfaceId | null;
+  graph: NodeGraph;
 }
 
+// ============================================================================
+// 8. Top-Level Ruleset Manifest (Schema v4)
+// ============================================================================
+
 export interface RulesetManifest {
-  schemaVersion: 2;
+  schemaVersion: typeof CURRENT_SCHEMA_VERSION;
   id: string;
   name: string;
   description?: string;
   author?: string;
   defaultGridSize: { width: number; height: number };
   defaultCellTypeId: CellTypeId;
-  initialCycles?: number;
-  setupOptions?: SetupOptionsManifest;
-  worldGenerator: GeneratorStep[];
-  resources: ResourceManifest[];
+  defaultHoverInterfaceId?: InterfaceId | null;
+  setupOptions?: SetupOptionManifest[];
+  sprites: SpriteAssetManifest[];
+  globalState: GlobalStateManifest;
   supplies: SupplyManifest[];
+  interfaces: InterfaceManifest[];
+  worldGenerator: NodeGraph;
   cellTypes: CellTypeManifest[];
 }
 
-export interface RulesetEntry {
-  manifest: RulesetManifest;
-  isCustom: boolean;
-}
-
 // ============================================================================
-// Runtime Outcomes, Inspection, Stats & Serialization
+// 9. Runtime Snapshots, Notifications, Stats & Saves
 // ============================================================================
 
-export interface CellNotificationDraft {
+export type NotificationScope = 'global' | 'cell';
+export type NotificationSeverity = 'info' | 'warning' | 'danger';
+
+export interface GameNotification {
+  id: string;
+  scope: NotificationScope;
   severity: NotificationSeverity;
   title: string;
   message: string;
-}
-
-export interface CellNotification extends CellNotificationDraft {
-  id: string;
-  x: number;
-  y: number;
-  cellTypeId: CellTypeId;
   cycle: number;
+  x?: number;
+  y?: number;
+  cellTypeId?: CellTypeId;
 }
 
-export interface CellTickOutcome {
-  nextTypeId: CellTypeId;
-  nextState: CellStateData | null;
-  consumedSupplies: Record<SupplyId, number>;
-  consumedResources: ResourceDelta;
-  producedResources: ResourceDelta;
-  emissions: SupplyEmission[];
-  notification: CellNotificationDraft | null;
-  matchedLabel?: string;
-  matchedTone?: StatusTone;
-  firstFailedConditions?: Condition[];
-}
-
-export interface ClickExecutionResult {
-  uiAction: UiClickAction | null;
-  mutated: boolean;
-}
-
-export interface DemolishInfo {
-  lines: { label: string; value: string; tone?: StatusTone }[];
-  warnings: string[];
-}
-
-export interface CellInspection {
-  x: number;
-  y: number;
-  cellType: CellTypeManifest;
-  state: CellStateData;
-  supplies: Record<SupplyId, number>;
-  nextCellType: CellTypeManifest;
-  willChange: boolean;
-  transitionLabel: string;
-  transitionTone: StatusTone;
-  statusBadge: StatusBadge | null;
-}
-
-export interface ResourceProjectionBreakdown {
+export interface ResourceBreakdown {
   gained: number;
   consumed: number;
-  net: number;
 }
 
 export interface SimulationStats {
   cycle: number;
-  counts: Record<CellTypeId, number>;
-  totalCells: number;
-  resources: Record<ResourceId, number>;
-  resourceCaps: Record<ResourceId, number | null>;
-  projectedDelta: ResourceDelta;
-  projectedBreakdown: Record<ResourceId, ResourceProjectionBreakdown>;
-  atRiskCount: number;
+  globalValues: Record<GlobalVarId, RuntimeValue>;
+  globalCaps: Record<GlobalVarId, number>;
+  projectedDelta: Record<GlobalVarId, number>;
+  projectedBreakdown: Record<GlobalVarId, ResourceBreakdown>;
+  cellCounts: Record<CellTypeId, number>;
 }
 
-export interface StepResult {
-  cycle: number;
-  producedResourcesDelta: ResourceDelta;
-  consumedResourcesDelta: ResourceDelta;
-  lostCellsCount: number;
-  consumedTotals: Record<SupplyId, number>;
-  producedTotals: Record<SupplyId, number>;
-  notifications: CellNotification[];
-}
-
-export interface AffordabilityCheck {
-  ok: boolean;
-  missing: {
-    resourceId: ResourceId;
-    resourceName: string;
-    need: number;
-    have: number;
+export interface CellRuntimeSnapshot {
+  x: number;
+  y: number;
+  cellType: CellTypeManifest;
+  visual: CellVisualState;
+  /** Filtered to public + readonly fields */
+  visibleState: {
+    key: string;
+    label: string;
+    type: ValueType;
+    value: RuntimeValue;
+    access: AccessLevel;
+  }[];
+  supplies: {
+    id: SupplyId;
+    name: string;
+    color: string;
+    amount: number;
   }[];
 }
 
 export interface SerializedSimulationState {
+  version: 4;
   rulesetId: string;
   width: number;
   height: number;
   cycle: number;
-  resources: Record<ResourceId, number>;
-  grid: number[];
-  cellStates: (CellStateData | null)[];
+  seed: string;
+  setupValues: Record<string, RuntimeValue>;
+  grid: CellTypeId[];
+  cellStates: Record<string, Record<string, RuntimeValue>>;
+  cellVisuals: Record<string, CellVisualState>;
+  globalValues: Record<GlobalVarId, RuntimeValue>;
+  globalCaps: Record<GlobalVarId, number>;
   supplies: Record<SupplyId, number[]>;
-  notifications: CellNotification[];
+  notifications: GameNotification[];
 }
+
+export type SeededRng = () => number;
+
+export interface GridCoordinate {
+  x: number;
+  y: number;
+}
+
+export type MouseButton = 'left' | 'right' | 'middle';
+
+export type SupplyOverlayMode = 'off' | 'heatmap' | 'numbers';
+
+export interface WorldSetupValues {
+  width: number;
+  height: number;
+  seed: string;
+  params: Record<string, RuntimeValue>;
+}
+

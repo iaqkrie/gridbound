@@ -1,152 +1,92 @@
 import {
-  RulesetEntry,
-  RulesetManifest,
   assertValidRuleset,
-  cloneManifestWithUniqueId,
-  createBlankManifest,
+  RulesetManifest,
   validateRulesetManifest,
 } from '../engine/sdk';
-import classicColonyJson from './classic-colony/ruleset.json';
+import { CLASSIC_COLONY_RULESET } from './classic-colony';
 
-const STORAGE_KEY = 'gridbound_custom_rulesets_v2';
+const CUSTOM_RULESETS_STORAGE_KEY = 'gridbound_custom_rulesets_v4';
 
-const BUILTIN_MANIFESTS: RulesetManifest[] = [
-  assertValidRuleset(classicColonyJson),
+export interface RulesetRegistryEntry {
+  manifest: RulesetManifest;
+  builtIn: boolean;
+}
+
+const BUILTIN_RULESETS: RulesetManifest[] = [
+  assertValidRuleset(CLASSIC_COLONY_RULESET),
 ];
 
-const BUILTIN_IDS = new Set(BUILTIN_MANIFESTS.map((m) => m.id));
-
-function readStoredCustomManifests(): RulesetManifest[] {
+export function loadCustomRulesets(): RulesetManifest[] {
+  if (typeof window === 'undefined' || !window.localStorage) return [];
   try {
-    if (typeof window === 'undefined') return [];
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(CUSTOM_RULESETS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is RulesetManifest =>
-        validateRulesetManifest(item).valid && !BUILTIN_IDS.has(item.id)
-    );
+    const valid: RulesetManifest[] = [];
+    for (const item of parsed) {
+      if (validateRulesetManifest(item).valid) {
+        valid.push(item as RulesetManifest);
+      }
+    }
+    return valid;
   } catch {
     return [];
   }
 }
 
-function writeStoredCustomManifests(list: RulesetManifest[]): void {
-  try {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // Ignore storage quota errors gracefully
-  }
+export function saveCustomRuleset(manifest: RulesetManifest): void {
+  assertValidRuleset(manifest);
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const current = loadCustomRulesets().filter((r) => r.id !== manifest.id);
+  current.push(manifest);
+  window.localStorage.setItem(CUSTOM_RULESETS_STORAGE_KEY, JSON.stringify(current));
 }
 
-export interface RulesetImportResult {
-  ok: boolean;
-  entry?: RulesetEntry;
+export function deleteCustomRuleset(id: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const current = loadCustomRulesets().filter((r) => r.id !== id);
+  window.localStorage.setItem(CUSTOM_RULESETS_STORAGE_KEY, JSON.stringify(current));
+}
+
+export function getAllRulesets(): RulesetRegistryEntry[] {
+  const builtInEntries: RulesetRegistryEntry[] = BUILTIN_RULESETS.map((m) => ({
+    manifest: m,
+    builtIn: true,
+  }));
+  const customEntries: RulesetRegistryEntry[] = loadCustomRulesets().map((m) => ({
+    manifest: m,
+    builtIn: false,
+  }));
+  return [...builtInEntries, ...customEntries];
+}
+
+export function getRulesetById(id: string): RulesetManifest | undefined {
+  return getAllRulesets().find((e) => e.manifest.id === id)?.manifest;
+}
+
+export function exportRulesetJson(manifest: RulesetManifest): string {
+  return JSON.stringify(manifest, null, 2);
+}
+
+export function importRulesetJson(jsonText: string): {
+  manifest?: RulesetManifest;
   errors?: string[];
-}
-
-class RulesetStore {
-  private customManifests: RulesetManifest[] = readStoredCustomManifests();
-
-  public list(): RulesetEntry[] {
-    return [
-      ...BUILTIN_MANIFESTS.map((manifest) => ({ manifest, isCustom: false })),
-      ...this.customManifests.map((manifest) => ({ manifest, isCustom: true })),
-    ];
-  }
-
-  public allIds(): string[] {
-    return [
-      ...BUILTIN_MANIFESTS.map((m) => m.id),
-      ...this.customManifests.map((m) => m.id),
-    ];
-  }
-
-  public isBuiltin(id: string): boolean {
-    return BUILTIN_IDS.has(id);
-  }
-
-  public getById(id: string): RulesetManifest {
-    const found =
-      BUILTIN_MANIFESTS.find((m) => m.id === id) ??
-      this.customManifests.find((m) => m.id === id);
-    return found ?? BUILTIN_MANIFESTS[0];
-  }
-
-  public createBlankDraft(): RulesetManifest {
-    return createBlankManifest(this.allIds());
-  }
-
-  public cloneDraft(sourceId: string): RulesetManifest {
-    const source = this.getById(sourceId);
-    return cloneManifestWithUniqueId(source, this.allIds());
-  }
-
-  public saveCustom(
-    manifest: RulesetManifest,
-    previousCustomId?: string | null
-  ): RulesetImportResult {
-    const validation = validateRulesetManifest(manifest);
-    if (!validation.valid) {
-      return { ok: false, errors: validation.errors };
-    }
-
-    if (BUILTIN_IDS.has(manifest.id)) {
+} {
+  try {
+    const parsed = JSON.parse(jsonText);
+    const res = validateRulesetManifest(parsed);
+    if (!res.valid) {
       return {
-        ok: false,
-        errors: [
-          `Ruleset id "${manifest.id}" conflicts with a built-in ruleset`,
-        ],
+        errors: res.errors.map((e) => `${e.path || 'root'}: ${e.message}`),
       };
     }
-
-    const cloned: RulesetManifest = JSON.parse(JSON.stringify(manifest));
-    const filtered = this.customManifests.filter(
-      (m) => m.id !== cloned.id && m.id !== previousCustomId
-    );
-    const existingIdx = this.customManifests.findIndex(
-      (m) => m.id === (previousCustomId ?? cloned.id)
-    );
-
-    if (existingIdx >= 0 && existingIdx <= filtered.length) {
-      filtered.splice(existingIdx, 0, cloned);
-      this.customManifests = filtered;
-    } else {
-      this.customManifests = [...filtered, cloned];
-    }
-
-    writeStoredCustomManifests(this.customManifests);
-    return { ok: true, entry: { manifest: cloned, isCustom: true } };
-  }
-
-  public importFromJson(rawJson: string): RulesetImportResult {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawJson);
-    } catch (err) {
-      return {
-        ok: false,
-        errors: [
-          err instanceof Error
-            ? `Invalid JSON: ${err.message}`
-            : 'Invalid JSON file',
-        ],
-      };
-    }
-
-    return this.saveCustom(parsed as RulesetManifest);
-  }
-
-  public remove(id: string): boolean {
-    if (BUILTIN_IDS.has(id)) return false;
-    const prevLen = this.customManifests.length;
-    this.customManifests = this.customManifests.filter((m) => m.id !== id);
-    if (this.customManifests.length === prevLen) return false;
-    writeStoredCustomManifests(this.customManifests);
-    return true;
+    return { manifest: parsed as RulesetManifest };
+  } catch (err) {
+    return {
+      errors: [err instanceof Error ? err.message : 'Invalid JSON syntax'],
+    };
   }
 }
 
-export const rulesetStore = new RulesetStore();
+export { CLASSIC_COLONY_RULESET };

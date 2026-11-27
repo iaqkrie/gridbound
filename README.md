@@ -1,43 +1,44 @@
 # gridbound
 
-![Version](https://img.shields.io/badge/version-0.1.0--alpha-10B981?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.1.0--alpha.1-10B981?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-0EA5E9?style=flat-square)
 ![Stack](https://img.shields.io/badge/stack-React%2019%20%C2%B7%20TypeScript%20%C2%B7%20Vite-1F2A38?style=flat-square)
 
-**gridbound** is a turn-based cellular strategy engine and **visual Ruleset Studio** built around **Spatial Supplies** and **Global Resources**.
+**gridbound** is a turn-based cellular strategy engine, **node-native Schema v4 SDK**, and **Visual Ruleset Studio** built around **Spatial Supplies**, access-controlled **GlobalState**, **32×32 PNG sprites**, and **Universal Interfaces**.
 
-Every ruleset in gridbound is a pure JSON file (`schemaVersion: 2`). Cell behaviors, click actions, visuals, inspection panels, and procedural map generators are assembled visually in **Ruleset Studio** — or edited directly as JSON — with zero TypeScript code required.
+Every ruleset in gridbound is a self-contained manifest (`schemaVersion: 4`). Cell behaviors, world-level logic, custom UI popovers & hover cards, 32×32 pixel-art sprites, and procedural layer/mask map generators are authored visually in **Ruleset Studio** and executed by a deterministic load-time compiled graph VM — with zero TypeScript code required.
 
-> **Alpha Notice (`v0.1.0-alpha`):** Core simulation engine, Schema v2 JSON format, Visual Ruleset Studio, and the built-in `Classic Colony` ruleset are live and playable. Expect breaking schema refinements before `v1.0.0`.
+> **Alpha Notice (`v0.1.0-alpha.1`):** Node-native Schema v4 engine, Visual Ruleset Studio, 32×32 pixel-art editor, live world generator preview, and the rebuilt `Classic Colony` ruleset are live and playable. Expect schema refinements before `v1.0.0`.
 
-<!-- Replace the URL below once you publish a live demo (GitHub Pages / Cloud Run / AI Studio) -->
 **Live Demo:** [Play gridbound in your browser](https://iaqkrie.github.io/gridbound/)
 
 ---
 
 ## Highlights
 
-### Ruleset Studio (Visual Editor)
-Build complete turn-based grid games without hand-writing JSON:
-- **Start Anywhere:** create a blank ruleset from scratch, edit your custom rulesets, or **Clone & Edit** any built-in ruleset (including `Classic Colony`).
-- **Structured When / Do / Else Cards:** author `onCycle`, `onClick` (left & right), `onBuild`, `onDemolish`, and `onLost` rules with dropdown pickers, reordering, duplication, `stop` control, and nested `any` / `not` conditions.
-- **34-Icon Vector Gallery + Glyphs:** choose from 34 categorized vector icons (`Terrain`, `Industry`, `Civic`, `Special`), optional 1–2 character `glyph` overlays, full-tile fills, borders, conditional visual overrides, and `dot` / `bar` indicators.
-- **Live World Generator Preview:** configure `fill`, `clusters`, `scatter`, and `placeNear` steps with a real-time mini-map preview and seed roller.
-- **Safe Cascade ID Renaming & Validation:** renaming a resource, supply, or cell ID updates every reference across the ruleset automatically; live validation issues jump straight to the exact section or cell.
-- **One-Click Test Play Sandbox:** launch an unsaved draft directly in a live sandbox with **New Seed** and **Back to Editor** controls, or save to your local browser library and **Export / Import `.json`**.
+### Visual Ruleset Studio
+Create complete turn-based grid games directly in the browser:
+- **Start Anywhere:** create a new ruleset from scratch, edit custom rulesets, or open any built-in ruleset (including `Classic Colony`) in read-only mode and click **Duplicate as Custom**.
+- **Unified Node Graph Editor:** wire typed color-coded ports (`exec`, `number`, `boolean`, `string`, `any`, `mask`, `layer`) across **Cell Behavior**, **Global World Logic**, **Interface Actions**, and **World Generation**, complete with pan/zoom, right-click searchable node palette, Auto Layout, Fit View, and a contextual Node Inspector.
+- **Sprites (`32×32 PNG`) + Built-in Pixel Editor:** upload PNG images (auto-resized nearest-neighbor to 32×32) or paint directly in the integrated 32×32 pixel-art editor with pencil, eraser, flood-fill, eyedropper, palette, undo/redo, flip, grid toggle, and live scale preview.
+- **GlobalState & Access Control:** configure `public`, `readonly`, and `private` global variables, optional dynamic caps (`global.addCap`), a customizable HUD bar with live TopBar preview, and world-level `On Start` / `On Cycle` logic.
+- **WorldGenerator + Live Map Preview:** compose procedural terrain from 2D masks (`gen.noise`, `gen.clusters`, `gen.scatter`, `gen.proximity`, `gen.maskMath`, `gen.threshold`) and cell layers (`gen.fillLayer`, `gen.paintLayer`, `gen.mergeLayers`) while inspecting a live sprite-rendered map preview with seed rolling, grid size presets, setup options, and tile distribution.
+- **Universal Interfaces:** reuse built-in engine templates (`@builtin/cell_picker`, `@builtin/confirm`, `@builtin/inspector`) or clone them into custom interfaces with a visual Block Builder, Live Preview, and scoped Interface Logic Graph.
+- **Live Validation, JSON Export & Instant Test Play:** validate Schema v4 manifests in real time, save with `Ctrl+S`, export/import `.json`, and click **Test Play** to launch an ephemeral playtest session on your unsaved draft with one-click **Back to Studio**.
 
-### 3-Phase Cellular Simulation Engine (`SimulationCore`)
-Every cycle runs deterministically in three phases:
-1. **Consume & Transition:** evaluate each cell's `onCycle` rules — check local spatial supplies, global resources, neighbors, or cell state; consume inputs, mutate state, or transform cells.
-2. **Spatial Supply Decay:** decay per-tile supply fields (`clear`, `none`, `linear`, or `percent` retention).
-3. **Produce & Emit:** emit spatial supplies across `moore`, `vonNeumann`, or `self` neighborhoods and add produced global resources for the next cycle.
+### 4-Phase Node-Native Simulation Engine (`SimulationCore`)
+Every cycle executes deterministically in four phases:
+1. **Decay:** apply `DecayRule` (`clear`, `none`, `linear`, or `percent`) across all spatial supplies and decaying global variables.
+2. **Emit:** run `event.emit` graphs on active cells to broadcast numeric spatial supplies (`self`, `moore`, `vonNeumann`, `relative`, `coords`).
+3. **World Cycle:** run GlobalState `event.cycle` logic (full read/write access to `public`, `readonly`, and `private` globals).
+4. **Cell React:** execute `event.cycle` graphs on cells (ordered by optional `priorityByState`), mutating state, consuming/adding resources, updating per-instance visuals (`setSprite`, `setColor`, `setOpacity`), or transforming tiles (`event.exit` → `event.enter`).
 
 ### Built-in Ruleset: `Classic Colony`
-A complete colony-management ruleset showcasing Schema v2:
-- **Map Setup:** `16×12`, `32×24`, and `64×48` presets, custom seeds, and configurable terrain density.
-- **Global Resources:** Money, Food, Wood, Stone, Population (unlimited and capped storage).
+A complete colony-management ruleset powered natively by Schema v4:
+- **Setup Options:** configurable map sizes (`10×10`, `14×14`, `20×20`), custom seeds, and procedural terrain parameters (`waterLevel`, `forestDensity`).
+- **GlobalState:** Money, Food, Wood, Stone, and Population with dynamic housing & warehouse capacity caps.
 - **Spatial Supply:** Moisture emitted by Water tiles and consumed by Farms.
-- **Cell Types:** Empty, Water, Forest, Mountain, Farm, Sawmill, Quarry, House, Warehouse (with configurable storage cap bonuses and worker transfer panels).
+- **9 Cell Types & Custom Interfaces:** Empty, Water, Forest, Mountain, Farm, Sawmill, Quarry, House, and Warehouse — with custom worker assignment, resource cap selector, build picker, and demolish confirmation flows.
 
 ---
 
@@ -45,12 +46,13 @@ A complete colony-management ruleset showcasing Schema v2:
 
 | Input | Action |
 | --- | --- |
-| **Left Click** | Trigger cell's `onClick.left` rule (e.g. open Build Menu on Empty tile, open Cell Panel on buildings) |
-| **Right Click** | Trigger cell's `onClick.right` rule (e.g. Demolish confirmation) |
+| **Left Click** | Trigger cell's `event.click` graph (e.g. open Cell Picker or custom cell interface) |
+| **Right Click** | Trigger cell's `event.rightClick` graph (e.g. Demolish confirmation) |
 | **Mouse Wheel** | Zoom in / out around cursor |
 | **Middle Drag** or **Space + Drag** | Pan across the grid |
 | **Enter** or **N** | Advance to the Next Cycle |
-| **Esc** | Close open popovers / return menu |
+| **Esc** | Close open popovers / cancel active interface |
+| **Ctrl+S / Cmd+S** *(Studio)* | Quick-save current custom ruleset |
 
 ---
 
@@ -59,8 +61,8 @@ A complete colony-management ruleset showcasing Schema v2:
 Requires **Node.js 20+** (no API keys or `.env` configuration needed).
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/iaqkrie/gridbound.git
+cd gridbound
 npm install
 npm run dev
 ```
@@ -83,27 +85,40 @@ Open `http://localhost:3000` in your browser.
 ```text
 src/
 ├── components/
-│   ├── editor/                 # Ruleset Studio UI (rule cards, icon picker, generator preview, panel builder)
-│   ├── canvasRenderer.ts       # High-DPI Canvas 2D renderer (Path2D icons, glyphs, overlays, previews)
+│   ├── studio/                 # Visual Ruleset Studio
+│   │   ├── RulesetStudio.tsx   # Studio shell, validation, JSON export, Test Play
+│   │   ├── NodeGraphEditor.tsx # Shared pan/zoom SVG+HTML node graph canvas
+│   │   ├── NodeInspector.tsx   # Scoped parameter inspector for all node types
+│   │   ├── GeneralTab.tsx      # Identity, defaults, setupOptions CRUD
+│   │   ├── SpritesTab.tsx      # 32×32 PNG upload + built-in pixel-art editor
+│   │   ├── GlobalStateTab.tsx  # Variables, HUD bar + live preview, World Logic
+│   │   ├── SuppliesTab.tsx     # Unified numeric spatial supplies & DecayRules
+│   │   ├── WorldGeneratorTab.tsx # Layer/mask graph + live sprite map preview
+│   │   ├── CellsTab.tsx        # Cell properties, state schema, Behavior Graph
+│   │   ├── InterfacesTab.tsx   # Built-in cloning, Block Builder, preview, Logic Graph
+│   │   └── studioUtils.ts      # Starter/clone factories, auto-layout, PNG 32×32 helpers
+│   ├── canvasRenderer.ts       # High-DPI Canvas 2D sprite & supply overlay renderer
 │   ├── GridCanvas.tsx          # Viewport camera, zoom/pan, pointer interaction
-│   ├── MainMenu.tsx            # New game setup, saves, JSON import, Ruleset Studio entry
-│   ├── TopBar.tsx              # Resource HUD, cycle button, sandbox controls
-│   └── ...                     # CellPanelView, BuildMenu, HoverCellCard, overlays
+│   ├── InterfacePopover.tsx    # Universal renderer for built-in & custom interfaces
+│   ├── HoverCellCard.tsx       # Ruleset default / per-cell hover interface card
+│   ├── MainMenu.tsx            # New game setup, saves, JSON import, Studio entry
+│   ├── TopBar.tsx              # GlobalState HUD, cycle button, Playtest return
+│   └── ...                     # CellPopover, NotificationBanner, overlays
 ├── engine/
 │   ├── sdk/
-│   │   ├── types.ts            # Ruleset Schema v2 TypeScript definitions
-│   │   ├── icons.ts            # Shared 34-icon 24×24 vector registry (Canvas + SVG)
-│   │   ├── interpreter.ts      # Condition/Action rule evaluator & visual resolver
-│   │   ├── generator.ts        # Deterministic seeded world generator pipeline
-│   │   ├── decay.ts            # Spatial supply & resource decay processor
-│   │   ├── validator.ts        # Strict manifest validator with structured issue navigation
-│   │   └── refactor.ts         # Blank/clone factories & safe cascade ID renaming
-│   ├── SimulationCore.ts       # 3-phase ruleset-agnostic simulation core
-│   └── saveStore.ts            # Local browser save slots (localStorage)
+│   │   ├── types.ts            # Schema v4 manifest, node graph, and runtime types
+│   │   ├── nodeRegistry.ts     # Scoped node catalog (cell, global, interface, generator)
+│   │   ├── graphVm.ts          # Load-time graph compiler, VM executor & UI template engine
+│   │   ├── builtinInterfaces.ts # @builtin/cell_picker, confirm, inspector + clone helper
+│   │   ├── spritePng.ts        # Zero-dependency 32×32 PNG encoder & pixel-art builder
+│   │   ├── generator.ts        # Deterministic 2D Mask & Layer World Generator
+│   │   ├── decay.ts            # Spatial supply & variable decay + seeded PRNG
+│   │   └── validator.ts        # Strict Schema v4 manifest & graph validator
+│   ├── SimulationCore.ts       # 4-phase ruleset-agnostic simulation core
+│   └── saveStore.ts            # Local browser save slots (localStorage, v4)
 ├── i18n/                       # UI strings (en)
 ├── rulesets/
-│   ├── classic-colony/
-│   │   └── ruleset.json        # Built-in Classic Colony ruleset (Schema v2)
+│   ├── classic-colony/         # Built-in Classic Colony ruleset (Schema v4)
 │   └── index.ts                # Built-in + localStorage custom ruleset store
 └── utils/
     └── sound.ts                # Procedural Web Audio tactical feedback
@@ -111,77 +126,35 @@ src/
 
 ---
 
-## Ruleset Schema v2 Reference
+## Ruleset Schema v4 Overview
 
-You can author rulesets visually in **Ruleset Studio**, export them as `.json`, or write them by hand. See [`src/rulesets/classic-colony/ruleset.json`](./src/rulesets/classic-colony/ruleset.json) for a full working example.
-
-### Top-Level Manifest
+Rulesets are authored visually in **Ruleset Studio** and can be exported/imported as portable `.json` files:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 4,
   "id": "my_ruleset",
   "name": "My Ruleset",
-  "author": "Your Name",
-  "description": "Short summary of the ruleset.",
-  "defaultGridSize": { "width": 16, "height": 12 },
+  "author": "Author",
+  "description": "Custom cellular strategy ruleset.",
+  "defaultGridSize": { "width": 12, "height": 12 },
   "defaultCellTypeId": "empty",
-  "initialCycles": 1,
-  "setupOptions": { "allowSeed": true, "mapSizes": [], "params": [] },
-  "resources": [],
+  "defaultHoverInterfaceId": "@builtin/inspector",
+  "setupOptions": [],
+  "sprites": [],
+  "globalState": { "variables": [], "hud": [], "graph": { "nodes": [], "edges": [] } },
   "supplies": [],
-  "worldGenerator": [],
+  "interfaces": [],
+  "worldGenerator": { "nodes": [], "edges": [] },
   "cellTypes": []
 }
 ```
 
-### Global Resources (`resources`) & Spatial Supplies (`supplies`)
-
-- **Unlimited Resource:** `{ id, name, shortName?, color, kind: "unlimited", initialValue, tags?, decay? }`
-- **Capped Resource:** `{ id, name, shortName?, color, kind: "capped", initialValue, initialMax, tags?, decay? }`
-- **Spatial Supply:** `{ id, name, description?, color, maxExpected, maxAmount?, decay }`
-- **Decay Rules (`decay`):**
-  - `{ kind: "clear" }` — reset to `0` each cycle
-  - `{ kind: "none" }` — persist indefinitely
-  - `{ kind: "linear", amount }` — subtract a fixed amount each cycle
-  - `{ kind: "percent", retainRatio, round?: "floor" | "ceil" | "round", minStep? }` — retain a fraction (`0..1`) each cycle
-
-### World Generator Pipeline (`worldGenerator`)
-
-Executed sequentially on a fresh grid using a deterministic seeded RNG:
-- `{ type: "fill", cell }`
-- `{ type: "clusters", cell, clustersPer768, minClusters?, minSize, maxSize, onlyOnEmpty?, densityParam? }`
-- `{ type: "scatter", cell, countPer768, minCount?, onlyOnEmpty?, densityParam? }`
-- `{ type: "placeNear", cell, nearCell, radius?, neighborhood?, chance, maxCount?, onlyOnEmpty? }`
-
-### Conditions (`when`)
-
-All entries in `when` must pass (logical AND). Comparison operators (`op`): `"eq" | "neq" | "gt" | "gte" | "lt" | "lte"`.
-- `{ type: "supply", id, op, value }` — local tile supply amount
-- `{ type: "resource", id, op, value }` — global resource amount
-- `{ type: "state", key, op, value }` — cell local state property
-- `{ type: "neighbors", cell, op, value, radius?, neighborhood? }` — matching neighbor count
-- `{ type: "chance", probability }` — deterministic probability roll (`0..1`)
-- `{ type: "any", conditions: [...] }` — logical OR
-- `{ type: "not", condition }` — logical NOT
-
-### Actions (`do` / `else`)
-
-- **Resources:** `addResource`, `consumeResource`, `reclaimResource`, `refundStateToResource`
-- **Supplies:** `emitSupply` (`id`, `amount`, `radius`, `neighborhood`, `includeSelf?`), `consumeSupply`
-- **Cell State & Type:** `setState`, `addState` (`min?`, `max?`), `transform` (`to`)
-- **Feedback:** `notify` (`severity: "warning" | "danger"`, `title`, `message`)
-- **UI Actions (`onClick` only):** `openBuildMenu` (`options`), `openPanel`, `openDemolishConfirm`
-
-### Cell Types (`cellTypes`)
-
-Each cell type supports:
-- **Events:** `onCycle`, `onBuild`, `onDemolish`, `onLost` (arrays of `{ when?, do, else?, stop?, label?, tone? }`), and `onClick: { left?, right? }`.
-- **State & Costs:** `initialState`, `buildCost`, `buildSound`, `shortRule`.
-- **Passive Modifiers (`modifiers`):** `{ type: "capBonus", resource | resourceFromState, amount }`.
-- **Visuals (`visual`):** `{ color, icon?, glyph?, fullTile?, svgPath?, border?, substrateColor?, rules?, indicators? }` where `rules` can conditionally override `color`, `icon`, `glyph`, `border`, and `dim`, and `indicators` render `dot` or `bar` overlays.
-- **Hover Badges (`badges`):** `{ when?, text, tone }`.
-- **Interactive Panel (`panel`):** `{ title?, blocks: [...] }` supporting `stat`, `transfer`, `resourceSelect`, and `actionButton`.
+- **GlobalState:** typed variables (`number`, `boolean`, `string`) with `access: "public" | "readonly" | "private"`, optional `hasCap` / `initialMax`, `hud` layout entries, and a world `graph` (`event.start`, `event.cycle`).
+- **Supplies:** unified numeric spatial fields (`clear`, `none`, `linear`, `percent` decay) emitted by cells and queried via `supply.get` / `supply.consume`.
+- **Sprites:** 32×32 PNG assets (`dataUrl`) rendered crisply onto tiles and dynamically swappable at runtime via `cell.setSprite`, `cell.setColor`, and `cell.setOpacity`.
+- **Interfaces:** built-in templates (`@builtin/cell_picker`, `@builtin/confirm`, `@builtin/inspector`) or custom `InterfaceManifest` definitions (`popover`, `modal`, `hover`) combining declarative blocks (`text`, `stat`, `button`, `buttonRow`, `selectList`, `cellStateList`, `supplyList`) with `event.uiAction` graphs and `On Result` / `On Cancel` continuation pins.
+- **WorldGenerator:** deterministic layer/mask node graph driven by world seed and `setupOptions`.
 
 ---
 

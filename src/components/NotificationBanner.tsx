@@ -1,11 +1,11 @@
-import { AlertCircle, AlertTriangle, X } from 'lucide-react';
-import { CellNotification } from '../engine/sdk';
+import { AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
+import { GameNotification } from '../engine/sdk';
 import { t } from '../i18n';
 
 interface NotificationBannerProps {
-  notifications: readonly CellNotification[];
+  notifications: readonly GameNotification[];
   focusedNotificationId: string | null;
-  onFocusNotification: (notification: CellNotification) => void;
+  onFocusNotification: (notification: GameNotification) => void;
   onDismissNotification: (id: string) => void;
 }
 
@@ -28,53 +28,83 @@ export function NotificationBanner({
     >
       {visible.map((n) => {
         const isDanger = n.severity === 'danger';
+        const isInfo = n.severity === 'info';
+        const isCell =
+          n.scope === 'cell' && n.x !== undefined && n.y !== undefined;
         const isFocused = focusedNotificationId === n.id;
+
+        const borderClass = isFocused
+          ? 'border-[#10B981]'
+          : isDanger
+            ? 'border-[#F43F5E]/55'
+            : isInfo
+              ? 'border-[#38BDF8]/45'
+              : 'border-[#F59E0B]/45';
+
+        const titleColorClass = isDanger
+          ? 'text-[#F43F5E]'
+          : isInfo
+            ? 'text-[#38BDF8]'
+            : 'text-[#F59E0B]';
+
+        const icon = isDanger ? (
+          <AlertCircle
+            className="w-4 h-4 text-[#F43F5E] shrink-0 mt-0.5"
+            aria-hidden="true"
+          />
+        ) : isInfo ? (
+          <Info
+            className="w-4 h-4 text-[#38BDF8] shrink-0 mt-0.5"
+            aria-hidden="true"
+          />
+        ) : (
+          <AlertTriangle
+            className="w-4 h-4 text-[#F59E0B] shrink-0 mt-0.5"
+            aria-hidden="true"
+          />
+        );
+
+        const body = (
+          <>
+            {icon}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className={`text-xs font-semibold truncate ${titleColorClass}`}>
+                  {n.title}
+                </span>
+                {isCell && (
+                  <span className="font-mono tabular-nums text-[11px] text-[#8B98A9] shrink-0">
+                    [{n.x}, {n.y}]
+                  </span>
+                )}
+              </div>
+              {n.message && (
+                <p className="text-[11px] text-[#E6EDF3]/90 leading-snug mt-0.5">
+                  {n.message}
+                </p>
+              )}
+            </div>
+          </>
+        );
 
         return (
           <div
             key={n.id}
-            className={`pointer-events-auto w-full flex items-start gap-2.5 bg-[#111720]/95 border rounded-lg px-3 py-2 backdrop-blur-sm shadow-lg transition-colors ${
-              isFocused
-                ? 'border-[#10B981]'
-                : isDanger
-                  ? 'border-[#F43F5E]/55'
-                  : 'border-[#F59E0B]/45'
-            }`}
+            className={`pointer-events-auto w-full flex items-start gap-2.5 bg-[#111720]/95 border rounded-lg px-3 py-2 backdrop-blur-sm shadow-lg transition-colors ${borderClass}`}
           >
-            <button
-              type="button"
-              onClick={() => onFocusNotification(n)}
-              className="flex-1 min-w-0 flex items-start gap-2.5 text-left cursor-pointer focus-visible:outline-none"
-            >
-              {isDanger ? (
-                <AlertCircle
-                  className="w-4 h-4 text-[#F43F5E] shrink-0 mt-0.5"
-                  aria-hidden="true"
-                />
-              ) : (
-                <AlertTriangle
-                  className="w-4 h-4 text-[#F59E0B] shrink-0 mt-0.5"
-                  aria-hidden="true"
-                />
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span
-                    className={`text-xs font-semibold truncate ${
-                      isDanger ? 'text-[#F43F5E]' : 'text-[#F59E0B]'
-                    }`}
-                  >
-                    {n.title}
-                  </span>
-                  <span className="font-mono tabular-nums text-[11px] text-[#8B98A9] shrink-0">
-                    [{n.x}, {n.y}]
-                  </span>
-                </div>
-                <p className="text-[11px] text-[#E6EDF3]/90 leading-snug mt-0.5">
-                  {n.message}
-                </p>
+            {isCell ? (
+              <button
+                type="button"
+                onClick={() => onFocusNotification(n)}
+                className="flex-1 min-w-0 flex items-start gap-2.5 text-left cursor-pointer focus-visible:outline-none"
+              >
+                {body}
+              </button>
+            ) : (
+              <div className="flex-1 min-w-0 flex items-start gap-2.5 text-left">
+                {body}
               </div>
-            </button>
+            )}
 
             <button
               type="button"

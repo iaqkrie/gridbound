@@ -2,15 +2,13 @@ import { SimulationCore } from '../engine/SimulationCore';
 import {
   CellTypeId,
   GridCoordinate,
-  ResolvedVisualIndicator,
-  ResolvedVisualState,
   SupplyId,
   SupplyManifest,
   SupplyOverlayMode,
-  getIconDef,
 } from '../engine/sdk';
+import { hexToRgba, lightenHex } from '../utils/color';
 
-export const BASE_CELL_SIZE = 28;
+export const BASE_CELL_SIZE = 32;
 
 export interface CameraState {
   offsetX: number;
@@ -31,6 +29,7 @@ export interface GridRenderParams {
   highlightedCell: GridCoordinate | null;
   hoveredCell: GridCoordinate | null;
   previewCellTypeId: CellTypeId | null;
+  onSpriteLoaded?: () => void;
 }
 
 interface VisibleBounds {
@@ -40,36 +39,54 @@ interface VisibleBounds {
   endY: number;
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const clean = hex.replace('#', '');
-  const r = parseInt(clean.slice(0, 2), 16);
-  const g = parseInt(clean.slice(2, 4), 16);
-  const b = parseInt(clean.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+// ============================================================================
+// 32×32 PNG Sprite Image Cache
+// ============================================================================
+
+interface CachedSprite {
+  img: HTMLImageElement;
+  loaded: boolean;
 }
 
-function lightenHex(hex: string, amount: number): string {
-  const clean = hex.replace('#', '');
-  const r = parseInt(clean.slice(0, 2), 16);
-  const g = parseInt(clean.slice(2, 4), 16);
-  const b = parseInt(clean.slice(4, 6), 16);
-  const lr = Math.round(r + (255 - r) * amount);
-  const lg = Math.round(g + (255 - g) * amount);
-  const lb = Math.round(b + (255 - b) * amount);
-  return `rgb(${lr}, ${lg}, ${lb})`;
+const SPRITE_IMAGE_CACHE = new Map<string, CachedSprite>();
+
+function getSpriteImage(
+  dataUrl: string,
+  onLoaded?: () => void
+): HTMLImageElement | null {
+  let entry = SPRITE_IMAGE_CACHE.get(dataUrl);
+  if (!entry) {
+    const img = new Image();
+    entry = { img, loaded: false };
+    SPRITE_IMAGE_CACHE.set(dataUrl, entry);
+    img.onload = () => {
+      entry!.loaded = true;
+      onLoaded?.();
+    };
+    img.src = dataUrl;
+  }
+  return entry.loaded && entry.img.complete && entry.img.naturalWidth > 0
+    ? entry.img
+    : null;
 }
+
+// ============================================================================
+// Unified Numeric Supply Heatmap & Numbers
+// ============================================================================
 
 function drawSupplyHeatmap(
   ctx: CanvasRenderingContext2D,
   core: SimulationCore,
-  supplyBuf: Int16Array,
   supplyDef: SupplyManifest,
   bounds: VisibleBounds,
   offsetX: number,
   offsetY: number,
   cellSize: number
 ): void {
+  const supplyBuf = core.getSupplyBuffer(supplyDef.id);
+  if (!supplyBuf) return;
   const maxExp = Math.max(1, supplyDef.maxExpected);
+
   for (let y = bounds.startY; y <= bounds.endY; y++) {
     const row = y * core.width;
     const py = offsetY + y * cellSize;
@@ -77,7 +94,7 @@ function drawSupplyHeatmap(
       const val = supplyBuf[row + x];
       if (val <= 0) continue;
       const intensity = Math.min(1, val / maxExp);
-      const alpha = 0.1 + intensity * 0.28;
+      const alpha = 0.14 + intensity * 0.3;
       ctx.fillStyle = hexToRgba(supplyDef.color, alpha);
       ctx.fillRect(offsetX + x * cellSize, py, cellSize, cellSize);
     }
@@ -91,7 +108,7 @@ function drawGridHairlines(
   offsetY: number,
   cellSize: number
 ): void {
-  if (cellSize < 7) return;
+  if (cellSize < 8) return;
   ctx.strokeStyle = '#17202B';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -108,220 +125,9 @@ function drawGridHairlines(
   ctx.stroke();
 }
 
-function drawCellFrame(
-  ctx: CanvasRenderingContext2D,
-  visual: ResolvedVisualState,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number,
-  fullTileFill = false
-): void {
-  const color = visual.color;
-  const active = !visual.dim;
-
-  if (fullTileFill) {
-    ctx.fillStyle = hexToRgba(color, active ? 0.3 : 0.12);
-    ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
-  } else {
-    ctx.fillStyle = hexToRgba(color, active ? 0.24 : 0.1);
-    ctx.fillRect(innerX, innerY, innerSize, innerSize);
-  }
-
-  ctx.strokeStyle = active ? color : hexToRgba(color, 0.55);
-  ctx.lineWidth = Math.max(1, cellSize * (fullTileFill ? 0.042 : 0.058));
-  if (visual.border === 'dashed') {
-    ctx.setLineDash([3, 2]);
-  }
-  ctx.strokeRect(innerX + 0.5, innerY + 0.5, innerSize - 1, innerSize - 1);
-  ctx.setLineDash([]);
-}
-
-function drawGlyph(
-  ctx: CanvasRenderingContext2D,
-  glyph: string,
-  color: string,
-  active: boolean,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerSize: number
-): void {
-  if (cellSize < 12) return;
-  const text = glyph.trim().slice(0, 2);
-  if (!text) return;
-  const fontSize = Math.max(
-    9,
-    Math.round(innerSize * (text.length > 1 ? 0.44 : 0.56))
-  );
-  ctx.save();
-  ctx.font = `700 ${fontSize}px "JetBrains Mono", "Manrope", sans-serif`;
-  ctx.fillStyle = active ? lightenHex(color, 0.35) : hexToRgba(color, 0.5);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, px + cellSize / 2, py + cellSize / 2 + 0.5);
-  ctx.restore();
-}
-
-function drawSvgPath24(
-  ctx: CanvasRenderingContext2D,
-  pathData: string,
-  fillPathData: string | undefined,
-  strokeColor: string,
-  fillColor: string | undefined,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const scale = (innerSize * 0.78) / 24;
-  ctx.save();
-  ctx.translate(innerX + innerSize * 0.11, innerY + innerSize * 0.11);
-  ctx.scale(scale, scale);
-  if (fillPathData && fillColor) {
-    ctx.fillStyle = fillColor;
-    ctx.fill(new Path2D(fillPathData));
-  }
-  if (pathData) {
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = 1.85;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.stroke(new Path2D(pathData));
-  }
-  ctx.restore();
-}
-
-function drawIcon(
-  ctx: CanvasRenderingContext2D,
-  visual: ResolvedVisualState,
-  px: number,
-  py: number,
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  const active = !visual.dim;
-  const color = visual.color;
-  const iconDef = getIconDef(visual.icon);
-  const fullTileFill = visual.fullTile ?? Boolean(iconDef?.defaultFullTile);
-
-  drawCellFrame(
-    ctx,
-    visual,
-    px,
-    py,
-    cellSize,
-    innerX,
-    innerY,
-    innerSize,
-    fullTileFill
-  );
-
-  // 1. Explicit text glyph takes priority when set
-  if (visual.glyph && visual.glyph.trim().length > 0) {
-    drawGlyph(ctx, visual.glyph, color, active, px, py, cellSize, innerSize);
-    return;
-  }
-
-  // 2. Custom SVG path override
-  if (visual.svgPath) {
-    if (cellSize < 13) return;
-    drawSvgPath24(
-      ctx,
-      visual.svgPath,
-      undefined,
-      active ? lightenHex(color, 0.25) : hexToRgba(color, 0.5),
-      undefined,
-      innerX,
-      innerY,
-      innerSize
-    );
-    return;
-  }
-
-  // 3. Built-in 34-icon vector registry
-  if (iconDef && iconDef.id !== 'empty') {
-    if (cellSize < 12) return;
-    const strokeColor = active
-      ? lightenHex(color, 0.35)
-      : hexToRgba(color, 0.48);
-    const fillColor = iconDef.fillPath
-      ? hexToRgba(color, active ? 0.5 : 0.22)
-      : undefined;
-    drawSvgPath24(
-      ctx,
-      iconDef.path,
-      iconDef.fillPath,
-      strokeColor,
-      fillColor,
-      innerX,
-      innerY,
-      innerSize
-    );
-    return;
-  }
-
-  // 4. Fallback solid square when no icon/glyph set
-  if (!iconDef && cellSize >= 18) {
-    ctx.fillStyle = active
-      ? hexToRgba(color, 0.55)
-      : hexToRgba(color, 0.22);
-    const m = innerSize * 0.26;
-    ctx.fillRect(innerX + m, innerY + m, innerSize - m * 2, innerSize - m * 2);
-  }
-}
-
-function drawIndicators(
-  ctx: CanvasRenderingContext2D,
-  indicators: readonly ResolvedVisualIndicator[],
-  cellSize: number,
-  innerX: number,
-  innerY: number,
-  innerSize: number
-): void {
-  if (cellSize < 14 || indicators.length === 0) return;
-
-  for (const ind of indicators) {
-    if (ind.kind === 'dot') {
-      const markerR = Math.max(2, cellSize * 0.085);
-      const inset = markerR + Math.max(2, cellSize * 0.05);
-      let mx = innerX + innerSize - inset;
-      let my = innerY + innerSize - inset;
-      if (ind.position === 'topLeft') {
-        mx = innerX + inset;
-        my = innerY + inset;
-      } else if (ind.position === 'bottomLeft') {
-        mx = innerX + inset;
-        my = innerY + innerSize - inset;
-      }
-
-      ctx.beginPath();
-      ctx.arc(mx, my, markerR, 0, Math.PI * 2);
-      if (ind.filled) {
-        ctx.fillStyle = ind.color;
-        ctx.fill();
-      } else {
-        ctx.strokeStyle = ind.color;
-        ctx.lineWidth = 1.25;
-        ctx.stroke();
-      }
-    } else if (ind.kind === 'bar') {
-      const m = innerSize * 0.22;
-      const boxSize = innerSize - m * 2;
-      const barH = Math.max(2.5, boxSize * 0.36);
-      ctx.fillStyle = ind.color;
-      ctx.fillRect(
-        innerX + m + 1.5,
-        innerY + m + boxSize - barH - 1.5,
-        Math.max(1, boxSize - 3),
-        barH
-      );
-    }
-  }
-}
+// ============================================================================
+// O(1) Runtime Cell Visual Renderer (32×32 PNG Sprites + Color/Opacity)
+// ============================================================================
 
 function drawCells(
   ctx: CanvasRenderingContext2D,
@@ -329,50 +135,87 @@ function drawCells(
   bounds: VisibleBounds,
   offsetX: number,
   offsetY: number,
-  cellSize: number
+  cellSize: number,
+  onSpriteLoaded?: () => void
 ): void {
-  const gridBuf = core.getCellIndexBuffer();
-  const cellTypes = core.getCellTypes();
-  const defaultId = core.manifest.defaultCellTypeId;
-  const pad = Math.max(1.5, cellSize * 0.11);
+  const prevSmooth = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
 
   for (let y = bounds.startY; y <= bounds.endY; y++) {
-    const row = y * core.width;
     const py = offsetY + y * cellSize;
     for (let x = bounds.startX; x <= bounds.endX; x++) {
-      const cellType = cellTypes[gridBuf[row + x]];
-      if (
-        cellType.id === defaultId &&
-        cellType.visual.icon === 'empty' &&
-        !cellType.visual.glyph &&
-        !cellType.visual.svgPath &&
-        !cellType.visual.fullTile &&
-        (!cellType.visual.rules || cellType.visual.rules.length === 0)
-      ) {
-        continue;
-      }
-
       const px = offsetX + x * cellSize;
-      const innerX = px + pad;
-      const innerY = py + pad;
-      const innerSize = Math.max(2, cellSize - pad * 2);
-      const visual = core.resolveVisualAt(x, y);
+      const ct = core.getCellTypeAt(x, y);
+      const visual = core.getCellVisualAt(x, y);
 
-      if (visual.substrateColor) {
-        ctx.fillStyle = hexToRgba(visual.substrateColor, 0.2);
-        ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
+      ctx.save();
+      if (visual.opacity < 1) {
+        ctx.globalAlpha = visual.opacity;
       }
 
-      drawIcon(ctx, visual, px, py, cellSize, innerX, innerY, innerSize);
-      drawIndicators(ctx, visual.indicators, cellSize, innerX, innerY, innerSize);
+      // 1. Tile base background color
+      const baseColor = visual.tintColor ?? ct.defaultColor;
+      ctx.fillStyle = hexToRgba(baseColor, 0.42);
+      ctx.fillRect(px + 0.5, py + 0.5, cellSize - 1, cellSize - 1);
+
+      // 2. Optional substrate sprite (e.g. forest under sawmill)
+      if (ct.substrateSpriteId) {
+        const subAsset = core.spriteById.get(ct.substrateSpriteId);
+        if (subAsset) {
+          const subImg = getSpriteImage(subAsset.dataUrl, onSpriteLoaded);
+          if (subImg) {
+            ctx.save();
+            ctx.globalAlpha = visual.opacity * 0.4;
+            ctx.drawImage(subImg, px + 1, py + 1, cellSize - 2, cellSize - 2);
+            ctx.restore();
+          }
+        }
+      }
+
+      // 3. Active sprite (runtime override from cell.setSprite or defaultSpriteId)
+      let drewSprite = false;
+      if (visual.spriteId) {
+        const asset = core.spriteById.get(visual.spriteId);
+        if (asset) {
+          const img = getSpriteImage(asset.dataUrl, onSpriteLoaded);
+          if (img) {
+            ctx.drawImage(img, px + 1, py + 1, cellSize - 2, cellSize - 2);
+            drewSprite = true;
+          }
+        }
+      }
+
+      // 4. Clean solid-color fallback when sprite is null or still loading
+      if (!drewSprite && ct.id !== core.manifest.defaultCellTypeId) {
+        const pad = Math.max(2, cellSize * 0.14);
+        ctx.fillStyle = hexToRgba(baseColor, 0.72);
+        ctx.fillRect(px + pad, py + pad, cellSize - pad * 2, cellSize - pad * 2);
+        ctx.strokeStyle = lightenHex(baseColor, 0.25);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(
+          px + pad + 0.5,
+          py + pad + 0.5,
+          cellSize - pad * 2 - 1,
+          cellSize - pad * 2 - 1
+        );
+      }
+
+      // 5. Optional dynamic tint overlay from cell.setColor
+      if (visual.tintColor) {
+        ctx.fillStyle = hexToRgba(visual.tintColor, 0.26);
+        ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
+      }
+
+      ctx.restore();
     }
   }
+
+  ctx.imageSmoothingEnabled = prevSmooth;
 }
 
 function drawSupplyNumbers(
   ctx: CanvasRenderingContext2D,
   core: SimulationCore,
-  supplyBuf: Int16Array,
   supplyDef: SupplyManifest,
   bounds: VisibleBounds,
   offsetX: number,
@@ -380,17 +223,15 @@ function drawSupplyNumbers(
   cellSize: number
 ): void {
   if (cellSize < 18) return;
+  const supplyBuf = core.getSupplyBuffer(supplyDef.id);
+  if (!supplyBuf) return;
 
-  const gridBuf = core.getCellIndexBuffer();
-  const cellTypes = core.getCellTypes();
   const defaultId = core.manifest.defaultCellTypeId;
-
-  const emptyFontSize = Math.max(10, Math.min(20, Math.round(cellSize * 0.28)));
+  const emptyFontSize = Math.max(10, Math.min(18, Math.round(cellSize * 0.28)));
   const badgeFontSize = Math.max(9, Math.min(13, Math.round(cellSize * 0.2)));
   const emptyTextColor = lightenHex(supplyDef.color, 0.45);
-  const pad = Math.max(1.5, cellSize * 0.11);
-  const innerInset = Math.max(2, Math.round(cellSize * 0.045));
-  const showBadges = cellSize >= 28;
+  const pad = Math.max(1.5, cellSize * 0.08);
+  const showBadges = cellSize >= 26;
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -400,13 +241,14 @@ function drawSupplyNumbers(
     const py = offsetY + y * cellSize;
     const cy = py + cellSize / 2;
     for (let x = bounds.startX; x <= bounds.endX; x++) {
-      const val = supplyBuf[row + x];
+      const idx = row + x;
+      const val = supplyBuf[idx];
       if (val <= 0) continue;
-      const cellType = cellTypes[gridBuf[row + x]];
+      const ct = core.getCellTypeAt(x, y);
       const px = offsetX + x * cellSize;
       const text = String(val);
 
-      if (cellType.id === defaultId) {
+      if (ct.id === defaultId) {
         ctx.font = `600 ${emptyFontSize}px "JetBrains Mono", monospace`;
         ctx.fillStyle = emptyTextColor;
         ctx.fillText(text, px + cellSize / 2, cy);
@@ -415,17 +257,15 @@ function drawSupplyNumbers(
         const textW = ctx.measureText(text).width;
         const badgeH = badgeFontSize + 4;
         const badgeW = Math.max(badgeH, Math.ceil(textW) + 6);
-        const innerRight = px + cellSize - pad;
-        const innerTop = py + pad;
-        const bx = innerRight - badgeW - innerInset;
-        const by = innerTop + innerInset;
+        const bx = px + cellSize - pad - badgeW - 1;
+        const by = py + pad + 1;
 
         ctx.fillStyle = 'rgba(11, 15, 20, 0.88)';
         ctx.beginPath();
         ctx.roundRect(bx, by, badgeW, badgeH, 3);
         ctx.fill();
 
-        ctx.strokeStyle = hexToRgba(supplyDef.color, 0.45);
+        ctx.strokeStyle = hexToRgba(supplyDef.color, 0.5);
         ctx.lineWidth = 1;
         ctx.stroke();
 
@@ -436,45 +276,30 @@ function drawSupplyNumbers(
   }
 }
 
-function drawBuildPreview(
+function drawPreviewSprite(
   ctx: CanvasRenderingContext2D,
   core: SimulationCore,
   selectedCell: GridCoordinate,
   previewCellTypeId: CellTypeId,
   offsetX: number,
   offsetY: number,
-  cellSize: number
+  cellSize: number,
+  onSpriteLoaded?: () => void
 ): void {
-  const previewType = core.getCellTypeById(previewCellTypeId);
-  if (!previewType) return;
-
-  const affected = core.getEmissionPreviewCoords(
-    selectedCell.x,
-    selectedCell.y,
-    previewCellTypeId
-  );
-  if (affected.length === 0) return;
-
-  const previewBadge = core.getBuildPreview(
-    selectedCell.x,
-    selectedCell.y,
-    previewCellTypeId
-  );
-  const previewActive = previewBadge?.tone !== 'danger';
-  const previewColor = previewType.visual.color;
+  const ct = core.cellTypeById.get(previewCellTypeId);
+  if (!ct) return;
+  const px = offsetX + selectedCell.x * cellSize;
+  const py = offsetY + selectedCell.y * cellSize;
 
   ctx.save();
-  if (!previewActive) {
-    ctx.setLineDash([4, 3]);
-  }
-  for (const coord of affected) {
-    const px = offsetX + coord.x * cellSize;
-    const py = offsetY + coord.y * cellSize;
-    ctx.fillStyle = hexToRgba(previewColor, previewActive ? 0.22 : 0.08);
-    ctx.fillRect(px + 1, py + 1, cellSize - 2, cellSize - 2);
-    ctx.strokeStyle = hexToRgba(previewColor, previewActive ? 0.85 : 0.45);
-    ctx.lineWidth = 1.25;
-    ctx.strokeRect(px + 1.5, py + 1.5, cellSize - 3, cellSize - 3);
+  ctx.globalAlpha = 0.65;
+  ctx.imageSmoothingEnabled = false;
+  if (ct.defaultSpriteId) {
+    const asset = core.spriteById.get(ct.defaultSpriteId);
+    const img = asset ? getSpriteImage(asset.dataUrl, onSpriteLoaded) : null;
+    if (img) {
+      ctx.drawImage(img, px + 1, py + 1, cellSize - 2, cellSize - 2);
+    }
   }
   ctx.restore();
 }
@@ -492,6 +317,7 @@ export function renderGridScene({
   highlightedCell,
   hoveredCell,
   previewCellTypeId,
+  onSpriteLoaded,
 }: GridRenderParams): void {
   ctx.save();
   ctx.scale(dpr, dpr);
@@ -514,22 +340,19 @@ export function renderGridScene({
     endY: Math.min(core.height - 1, Math.ceil((vh - offsetY) / cellSize)),
   };
 
+  drawCells(ctx, core, bounds, offsetX, offsetY, cellSize, onSpriteLoaded);
+
   const activeSupplyDef = activeSupplyId
-    ? core.manifest.supplies.find((s) => s.id === activeSupplyId)
-    : undefined;
-  const supplyBuf = activeSupplyId
-    ? core.getSupplyBuffer(activeSupplyId)
+    ? core.supplyById.get(activeSupplyId)
     : undefined;
 
   if (
     (overlayMode === 'heatmap' || overlayMode === 'numbers') &&
-    supplyBuf &&
     activeSupplyDef
   ) {
     drawSupplyHeatmap(
       ctx,
       core,
-      supplyBuf,
       activeSupplyDef,
       bounds,
       offsetX,
@@ -539,13 +362,11 @@ export function renderGridScene({
   }
 
   drawGridHairlines(ctx, bounds, offsetX, offsetY, cellSize);
-  drawCells(ctx, core, bounds, offsetX, offsetY, cellSize);
 
-  if (overlayMode === 'numbers' && supplyBuf && activeSupplyDef) {
+  if (overlayMode === 'numbers' && activeSupplyDef) {
     drawSupplyNumbers(
       ctx,
       core,
-      supplyBuf,
       activeSupplyDef,
       bounds,
       offsetX,
@@ -555,17 +376,19 @@ export function renderGridScene({
   }
 
   if (selectedCell && previewCellTypeId) {
-    drawBuildPreview(
+    drawPreviewSprite(
       ctx,
       core,
       selectedCell,
       previewCellTypeId,
       offsetX,
       offsetY,
-      cellSize
+      cellSize,
+      onSpriteLoaded
     );
   }
 
+  // Board perimeter frame
   ctx.save();
   ctx.strokeStyle = '#3B4D63';
   ctx.lineWidth = 1.5;
